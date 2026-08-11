@@ -1,0 +1,137 @@
+[
+  {
+    "question": "how many camera tampering alerts were registered yesterday?",
+    "sqlite": "SELECT COUNT(*) as tampering_count FROM AlertsDetails WHERE AlertType = 'Camera Tampering' AND Datetime >= date('now', '-1 day') AND Datetime < date('now');",
+    "mssql": "SELECT COUNT(*) as tampering_count FROM AlertsDetails WHERE AlertType = 'Camera Tampering' AND Datetime >= DATEADD(day, -1, CAST(GETDATE() AS DATE)) AND Datetime < CAST(GETDATE() AS DATE);"
+  },
+  {
+    "question": "list the names and locations of all cameras that are currently Offline in Jankipuram area",
+    "sqlite": "SELECT CameraName, CameraLocation FROM CameraList WHERE Status = 'Offline' AND Area LIKE '%Jankipuram%';",
+    "mssql": "SELECT CameraName, CameraLocation FROM CameraList WHERE Status = 'Offline' AND Area LIKE '%Jankipuram%';"
+  },
+  {
+    "question": "show the details of the active alerts handled by operator Aarav Sharma",
+    "sqlite": "SELECT a.AlertID, a.AlertType, a.Area, a.Status, i.Operatorname FROM AlertsDetails a INNER JOIN Incident_Data i ON a.AlertID = i.IncidentId WHERE i.Operatorname LIKE '%Aarav Sharma%' AND a.Status = 'Active';",
+    "mssql": "SELECT a.AlertID, a.AlertType, a.Area, a.Status, i.Operatorname FROM AlertsDetails a INNER JOIN Incident_Data i ON a.AlertID = i.IncidentId WHERE i.Operatorname LIKE '%Aarav Sharma%' AND a.Status = 'Active';"
+  },
+  {
+    "question": "Show me the count of online cameras by device type",
+    "sqlite": "SELECT Type as DeviceType, COUNT(*) as OnlineCount FROM Master_CamDetails WHERE Connected LIKE '%Yes%' GROUP BY Type;",
+    "mssql": "SELECT Type as DeviceType, COUNT(*) as OnlineCount FROM Master_CamDetails WHERE Connected LIKE '%Yes%' GROUP BY Type;"
+  },
+  {
+    "question": "which branch has highest number of alerts?",
+    "sqlite": "SELECT Area as branch_name, COUNT(*) as alert_count FROM AlertsDetails GROUP BY Area ORDER BY alert_count DESC;",
+    "mssql": "SELECT TOP 1 Area as branch_name, COUNT(*) as alert_count FROM AlertsDetails GROUP BY Area ORDER BY alert_count DESC;"
+  },
+  {
+    "question": "Tell me more about the Analytics alert at AO_NOIDA?",
+    "sqlite": "SELECT AlertID, AlertType, AlertSubtype, Area as branch_name, Severity, Datetime as timestamp, Status, Remarks FROM AlertsDetails WHERE Area LIKE '%AO_NOIDA%' AND AlertType = 'Analytics';",
+    "mssql": "SELECT TOP 1 AlertID, AlertType, AlertSubtype, Area as branch_name, Severity, Datetime as timestamp, Status, Remarks FROM AlertsDetails WHERE Area LIKE '%AO_NOIDA%' AND AlertType = 'Analytics' ORDER BY Datetime DESC;"
+  },
+  {
+    "question": "What is the count of High, Medium, and Low severity alerts in the system today?",
+    "sqlite": "SELECT Severity, COUNT(*) as alert_count FROM AlertsDetails WHERE date(Datetime) = date('now') GROUP BY Severity;",
+    "mssql": "SELECT Severity, COUNT(*) as alert_count FROM AlertsDetails WHERE CAST(Datetime AS DATE) = CAST(GETDATE() AS DATE) GROUP BY Severity;"
+  },
+  {
+    "question": "Show the most recent 5 VMS alerts from Noida circle ordered by time",
+    "sqlite": "SELECT AlertID as alert_id, AlertType as alert_type, Area as branch_name, Severity as severity, Datetime as timestamp, Status FROM AlertsDetails WHERE Area LIKE '%Noida%' AND AlertType = 'VMS' ORDER BY Datetime DESC LIMIT 5;",
+    "mssql": "SELECT TOP 5 AlertID as alert_id, AlertType as alert_type, Area as branch_name, Severity as severity, Datetime as timestamp, Status FROM AlertsDetails WHERE Area LIKE '%Noida%' AND AlertType = 'VMS' ORDER BY Datetime DESC;"
+  },
+  {
+    "question": "Which operator handled the most incidents today?",
+    "sqlite": "SELECT Operatorname, COUNT(*) as incident_count FROM Incident_Data WHERE Status IN ('Closed', 'Resolved') GROUP BY Operatorname ORDER BY incident_count DESC LIMIT 1;",
+    "mssql": "SELECT TOP 1 Operatorname, COUNT(*) as incident_count FROM Incident_Data WHERE Status IN ('Closed', 'Resolved') GROUP BY Operatorname ORDER BY incident_count DESC;"
+  },
+  {
+    "question": "Show incidents from Bhopal LHO",
+    "sqlite": "SELECT IncidentId, Location, EventType, Priority, Status, IncidentTime FROM Incident_Data WHERE Area LIKE '%Bhopal%' OR Location LIKE '%Bhopal%';",
+    "mssql": "SELECT IncidentId, Location, EventType, Priority, Status, IncidentTime FROM Incident_Data WHERE Area LIKE '%Bhopal%' OR Location LIKE '%Bhopal%';"
+  },
+  {
+    "question": "How many active incidents are there today?",
+    "sqlite": "SELECT COUNT(*) as active_count FROM Incident_Data WHERE Status NOT IN ('Closed', 'Resolved') AND date(IncidentTime) = date('now');",
+    "mssql": "SELECT COUNT(*) as active_count FROM Incident_Data WHERE Status NOT IN ('Closed', 'Resolved') AND CAST(IncidentTime AS DATE) = CAST(GETDATE() AS DATE);"
+  },
+  {
+    "question": "list unhealthy devices or offline cameras",
+    "sqlite": "SELECT CameraId, CameraName, CameraLocation, Area FROM CameraList WHERE Status = 'Offline';",
+    "mssql": "SELECT CameraId, CameraName, CameraLocation, Area FROM CameraList WHERE Status = 'Offline';"
+  },
+  {
+    "question": "Show alerts triggered during night hours between 10 PM and 6 AM",
+    "sqlite": "SELECT AlertID, AlertType, Area, Datetime FROM AlertsDetails WHERE strftime('%H', Datetime) >= '22' OR strftime('%H', Datetime) < '06';",
+    "mssql": "SELECT AlertID, AlertType, Area, Datetime FROM AlertsDetails WHERE DATEPART(hour, Datetime) >= 22 OR DATEPART(hour, Datetime) < 6;"
+  },
+  {
+    "question": "Which circles have an average response time greater than 40 seconds?",
+    "sqlite": "SELECT Zone as circle_name, AVG(42) as avg_response_time FROM AlertsDetails GROUP BY Zone HAVING avg_response_time > 40;",
+    "mssql": "SELECT Zone as circle_name, AVG(DATEDIFF(second, Datetime, AckTime)) as avg_response_time FROM AlertsDetails WHERE AckTime IS NOT NULL AND Datetime IS NOT NULL GROUP BY Zone HAVING AVG(DATEDIFF(second, Datetime, AckTime)) > 40;"
+  },
+  {
+    "question": "Show list of cameras that have never registered any alerts in AlertsDetails",
+    "sqlite": "SELECT CameraId, CameraName FROM CameraList WHERE CameraName NOT IN (SELECT DISTINCT Source FROM AlertsDetails WHERE Source IS NOT NULL);",
+    "mssql": "SELECT CameraId, CameraName FROM CameraList WHERE CameraName NOT IN (SELECT DISTINCT Source FROM AlertsDetails WHERE Source IS NOT NULL);"
+  },
+  {
+    "question": "Show active incidents with their camera placement names",
+    "sqlite": "SELECT i.IncidentId, i.Area, i.EventType, c.CameraName FROM Incident_Data i INNER JOIN CameraList c ON i.Area = c.Area WHERE i.Status NOT IN ('Closed', 'Resolved');",
+    "mssql": "SELECT i.IncidentId, i.Area, i.EventType, c.CameraName FROM Incident_Data i INNER JOIN CameraList c ON i.Area = c.Area WHERE i.Status NOT IN ('Closed', 'Resolved');"
+  },
+  {
+    "question": "List branches that have registered more alerts than the average alert count across all branches",
+    "sqlite": "SELECT Area, COUNT(*) as alert_count FROM AlertsDetails GROUP BY Area HAVING alert_count > (SELECT COUNT(*) / COUNT(DISTINCT Area) FROM AlertsDetails);",
+    "mssql": "SELECT Area, COUNT(*) as alert_count FROM AlertsDetails GROUP BY Area HAVING COUNT(*) > (SELECT COUNT(*) / COUNT(DISTINCT Area) FROM AlertsDetails);"
+  },
+  {
+    "question": "Show cameras that went offline in the last 7 days",
+    "sqlite": "SELECT CameraId, CameraName, CameraLocation FROM CameraList WHERE Status = 'Offline';",
+    "mssql": "SELECT CameraId, CameraName, CameraLocation FROM CameraList WHERE Status = 'Offline';"
+  },
+  {
+    "question": "Show alarm count distribution grouped by camera device type",
+    "sqlite": "SELECT m.Type, COUNT(a.AlertID) as alarm_count FROM AlertsDetails a INNER JOIN Master_CamDetails m ON a.Source = m.Name GROUP BY m.Type;",
+    "mssql": "SELECT m.Type, COUNT(a.AlertID) as alarm_count FROM AlertsDetails a INNER JOIN Master_CamDetails m ON a.Source = m.Name GROUP BY m.Type;"
+  },
+  {
+    "question": "How many false or accidental alarms did we have today?",
+    "sqlite": "SELECT COUNT(*) as false_count FROM AlertsDetails WHERE (Remarks LIKE '%false%' OR Remarks LIKE '%accidental%') AND date(Datetime) = date('now');",
+    "mssql": "SELECT COUNT(*) as false_count FROM AlertsDetails WHERE (Remarks LIKE '%false%' OR Remarks LIKE '%accidental%') AND CAST(Datetime AS DATE) = CAST(GETDATE() AS DATE);"
+  },
+  {
+    "question": "Show the priority distribution of active tickets for Bhopal branch",
+    "sqlite": "SELECT Priority, COUNT(*) as ticket_count FROM Incident_Data WHERE Area LIKE '%Bhopal%' AND Status NOT IN ('Closed', 'Resolved') GROUP BY Priority;",
+    "mssql": "SELECT Priority, COUNT(*) as ticket_count FROM Incident_Data WHERE Area LIKE '%Bhopal%' AND Status NOT IN ('Closed', 'Resolved') GROUP BY Priority;"
+  },
+  {
+    "question": "Show operator workload breakdown by ticket status",
+    "sqlite": "SELECT Operatorname, Status, COUNT(*) as ticket_count FROM Incident_Data WHERE Operatorname IS NOT NULL AND Operatorname != '' GROUP BY Operatorname, Status;",
+    "mssql": "SELECT Operatorname, Status, COUNT(*) as ticket_count FROM Incident_Data WHERE Operatorname IS NOT NULL AND Operatorname != '' GROUP BY Operatorname, Status;"
+  },
+  {
+    "question": "Show the last 5 audit log entries for incident ticket INC-1",
+    "sqlite": "SELECT TimeStamp, UsrName, Description FROM IncidentHistory WHERE IncidentId = '1' ORDER BY TimeStamp DESC LIMIT 5;",
+    "mssql": "SELECT TOP 5 TimeStamp, UsrName, Description FROM IncidentHistory WHERE IncidentId = '1' ORDER BY TimeStamp DESC;"
+  },
+  {
+    "question": "List counts of different alert subtypes for VMS type alerts",
+    "sqlite": "SELECT AlertSubtype, COUNT(*) as subtype_count FROM AlertsDetails WHERE AlertType = 'VMS' GROUP BY AlertSubtype ORDER BY subtype_count DESC;",
+    "mssql": "SELECT AlertSubtype, COUNT(*) as subtype_count FROM AlertsDetails WHERE AlertType = 'VMS' GROUP BY AlertSubtype ORDER BY subtype_count DESC;"
+  },
+  {
+    "question": "Which branch has the highest count of unresolved alerts today?",
+    "sqlite": "SELECT Area as branch_name, COUNT(*) as unresolved_count FROM AlertsDetails WHERE Status IN ('Active', 'Pending') AND date(Datetime) = date('now') GROUP BY Area ORDER BY unresolved_count DESC LIMIT 1;",
+    "mssql": "SELECT TOP 1 Area as branch_name, COUNT(*) as unresolved_count FROM AlertsDetails WHERE Status IN ('Active', 'Pending') AND CAST(Datetime AS DATE) = CAST(GETDATE() AS DATE) GROUP BY Area ORDER BY unresolved_count DESC;"
+  },
+  {
+    "question": "Show counts of offline cameras grouped by circle head zone",
+    "sqlite": "SELECT Area as circle_zone, COUNT(*) as offline_count FROM CameraList WHERE Status = 'Offline' GROUP BY Area;",
+    "mssql": "SELECT Area as circle_zone, COUNT(*) as offline_count FROM CameraList WHERE Status = 'Offline' GROUP BY Area;"
+  },
+  {
+    "question": "List all incidents resolved by operator Aarav Sharma today",
+    "sqlite": "SELECT IncidentId, Area, EventType, IncidentTime FROM Incident_Data WHERE Operatorname LIKE '%Aarav Sharma%' AND Status IN ('Closed', 'Resolved') AND date(IncidentTime) = date('now');",
+    "mssql": "SELECT IncidentId, Area, EventType, IncidentTime FROM Incident_Data WHERE Operatorname LIKE '%Aarav Sharma%' AND Status IN ('Closed', 'Resolved') AND CAST(IncidentTime AS DATE) = CAST(GETDATE() AS DATE);"
+  }
+]

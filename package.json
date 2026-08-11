@@ -1,0 +1,16 @@
+{
+  "name": "sbi-cms-chatbot",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "install:frontend": "npm install --prefix frontend",
+    "install:backend": "pip install -r backend/requirements.txt",
+    "install:all": "npm run install:frontend && npm run install:backend",
+    "backend": "python -m uvicorn app.main:app --app-dir backend --host 0.0.0.0 --port 8001 --reload",
+    "frontend": "npm run dev --prefix frontend",
+    "dev": "concurrently \"npm run backend\" \"npm run frontend\""
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  }
+}

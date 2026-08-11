@@ -1,0 +1,183 @@
+"""
+SBI CMS - Production Database Integration Template (SQLAlchemy Boilerplate)
+
+This file demonstrates how to replace the mock JSON database (db.json) with a real 
+database server (PostgreSQL, Oracle, MySQL, SQL Server, etc.) without altering the 
+chatbot or frontend logic.
+
+To integrate your database:
+1. Rename this file to `data_service.py` (overwriting the current mock version).
+2. Configure credentials in the `.env` file (special characters like '@' are encoded automatically).
+3. Modify the SQL queries inside each method to match your database schema.
+"""
+
+import os
+import json
+import urllib.parse
+from datetime import datetime
+from dotenv import load_dotenv
+from sqlalchemy import create_engine, text
+
+# Load variables from .env file
+load_dotenv()
+
+class DataService:
+    def __init__(self):
+        # Fetch granular database coordinates
+        db_user = os.getenv("DB_USER", "sa")
+        password = os.getenv("DB_PASSWORD", "")
+        host = os.getenv("DB_HOST", "198.38.87.117")
+        port = os.getenv("DB_PORT", "1433")
+        dbname = os.getenv("DB_NAME", "OmniDash_CMS")
+
+        # Automatically URL-encode password to handle special characters like '@'
+        encoded_password = urllib.parse.quote_plus(password)
+        db_url = f"mssql+pymssql://{db_user}:{encoded_password}@{host}:{port}/{dbname}"
+        
+        # Initialize connection engine
+        self.engine = create_engine(
+            db_url,
+            pool_pre_ping=True,      # Automatically reconnects if connection drops
+            pool_recycle=3600,       # Recycle connections after 1 hour
+            pool_size=10,            # Maximum persistent connections
+            max_overflow=20          # Extra overflow connections allowed
+        )
+        print(f"[DATABASE] Successfully connected to SQL Server at {host}:{port}/{dbname}")
+
+    # ==========================================
+    # Example 1: Fetching Offline Cameras
+    # ==========================================
+    def get_offline_cameras(self, city=None):
+        query_str = """
+            SELECT 
+                c.camera_id, 
+                c.camera_name, 
+                c.location, 
+                c.last_seen 
+            FROM cameras c
+            JOIN branches b ON c.branch_id = b.branch_id
+            WHERE c.status = 'Offline'
+        """
+        
+        params = {}
+        if city:
+            query_str += " AND b.city = :city"
+            params["city"] = city
+
+        with self.engine.connect() as conn:
+            result = conn.execute(text(query_str), params)
+            return [dict(row) for row in result.mappings()]
+
+    # ==========================================
+    # Example 2: Aggregating Dashboard summary
+    # ==========================================
+    def get_dashboard_summary(self):
+        with self.engine.connect() as conn:
+            # Get total counts
+            total_cameras = conn.execute(text("SELECT COUNT(*) FROM cameras")).scalar() or 0
+            total_nvrs = conn.execute(text("SELECT COUNT(*) FROM nvrs")).scalar() or 0
+            total_alarms = conn.execute(text("SELECT COUNT(*) FROM alarms")).scalar() or 0
+            total_acs = conn.execute(text("SELECT COUNT(*) FROM access_controllers")).scalar() or 0
+            
+            total_devices = total_cameras + total_nvrs + total_alarms + total_acs
+
+            # Get offline counts
+            offline_cameras = conn.execute(text("SELECT COUNT(*) FROM cameras WHERE status = 'Offline'")).scalar() or 0
+            offline_nvrs = conn.execute(text("SELECT COUNT(*) FROM nvrs WHERE status = 'Offline'")).scalar() or 0
+            offline_alarms = conn.execute(text("SELECT COUNT(*) FROM alarms WHERE alarm_status = 'Offline'")).scalar() or 0
+            offline_acs = conn.execute(text("SELECT COUNT(*) FROM access_controllers WHERE status = 'Offline'")).scalar() or 0
+            
+            total_offline = offline_cameras + offline_nvrs + offline_alarms + offline_acs
+            total_online = total_devices - total_offline
+            
+            health_pct = round((total_online / total_devices) * 100, 1) if total_devices > 0 else 100.0
+
+            # Get active tickets
+            active_incidents = conn.execute(
+                text("SELECT COUNT(*) FROM incidents WHERE status IN ('Open', 'In-Progress')")
+            ).scalar() or 0
+            
+            critical_incidents = conn.execute(
+                text("SELECT COUNT(*) FROM incidents WHERE status IN ('Open', 'In-Progress') AND severity = 'Critical'")
+            ).scalar() or 0
+
+            # Get alert counts
+            alerts_today = conn.execute(text("SELECT COUNT(*) FROM alerts")).scalar() or 0
+            unack_alerts = conn.execute(text("SELECT COUNT(*) FROM alerts WHERE acknowledged = FALSE")).scalar() or 0
+
+            return {
+                "lhos_count": conn.execute(text("SELECT COUNT(*) FROM lhos")).scalar() or 0,
+                "branches_count": conn.execute(text("SELECT COUNT(*) FROM branches")).scalar() or 0,
+                "total_devices": total_devices,
+                "total_online": total_online,
+                "total_offline": total_offline,
+                "offline_cameras": offline_cameras,
+                "system_health_pct": health_pct,
+                "active_incidents_count": active_incidents,
+                "critical_incidents_count": critical_incidents,
+                "alerts_today_count": alerts_today,
+                "unacknowledged_alerts_count": unack_alerts
+            }
+
+    # ==========================================
+    # Example 3: Filtering Incidents
+    # ==========================================
+    def get_incidents(self, lho_name=None, status=None, branch_name=None):
+        query_str = "SELECT * FROM incidents WHERE 1=1"
+        params = {}
+        
+        if lho_name:
+            query_str += " AND LOWER(lho_name) = LOWER(:lho_name)"
+            params["lho_name"] = lho_name
+        if status:
+            if status == "open_active":
+                query_str += " AND status IN ('Open', 'In-Progress')"
+            else:
+                query_str += " AND LOWER(status) = LOWER(:status)"
+                params["status"] = status
+        if branch_name:
+            query_str += " AND LOWER(branch_name) = LOWER(:branch_name)"
+            params["branch_name"] = branch_name
+            
+        query_str += " ORDER BY timestamp DESC"
+
+        with self.engine.connect() as conn:
+            result = conn.execute(text(query_str), params)
+            incidents = []
+            for row in result.mappings():
+                inc = dict(row)
+                if isinstance(inc.get("worklog"), str):
+                    inc["worklog"] = json.loads(inc["worklog"])
+                if isinstance(inc.get("sop_steps"), str):
+                    inc["sop_steps"] = json.loads(inc["sop_steps"])
+                incidents.append(inc)
+            return incidents
+
+    # ==========================================
+    # Example 4: Incident details (Click resolution)
+    # ==========================================
+    def get_incident_details(self, incident_id):
+        with self.engine.connect() as conn:
+            inc_row = conn.execute(
+                text("SELECT * FROM incidents WHERE UPPER(incident_id) = UPPER(:id)"),
+                {"id": incident_id}
+            ).mappings().first()
+            
+            if not inc_row:
+                return None
+                
+            inc = dict(inc_row)
+            if isinstance(inc.get("worklog"), str):
+                inc["worklog"] = json.loads(inc["worklog"])
+            if isinstance(inc.get("sop_steps"), str):
+                inc["sop_steps"] = json.loads(inc["sop_steps"])
+                
+            alert_row = conn.execute(
+                text("SELECT * FROM alerts WHERE alert_id = :alert_id"),
+                {"alert_id": inc.get("linked_alert_id")}
+            ).mappings().first()
+            
+            return {
+                "incident": inc,
+                "alert": dict(alert_row) if alert_row else None
+            }
