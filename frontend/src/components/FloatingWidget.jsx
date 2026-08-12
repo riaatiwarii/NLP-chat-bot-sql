@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { MessageSquare, X, Send, Shield, Bot, User, Sparkles, Minimize2, Maximize2, RotateCcw } from 'lucide-react';
 
-export default function FloatingWidget({ gatewayUrl = '', initialOpen = false }) {
+export default function FloatingWidget({ gatewayUrl = '', initialOpen = false, theme = 'dark', position = 'bottom-right', apiKey = '' }) {
   const [isOpen, setIsOpen] = useState(initialOpen);
   const [messages, setMessages] = useState([
     {
@@ -45,15 +45,21 @@ export default function FloatingWidget({ gatewayUrl = '', initialOpen = false })
 
     try {
       const endpoint = gatewayUrl ? `${gatewayUrl.replace(/\/$/, '')}/api/chat` : '/api/chat';
+      const headers = { 'Content-Type': 'application/json' };
+      if (apiKey) {
+        headers['Authorization'] = `Bearer ${apiKey}`;
+      }
+
       const response = await fetch(endpoint, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: headers,
         body: JSON.stringify({
           message: query.trim(),
           history: updatedMessages,
           context: chatContext
         })
       });
+
 
       if (response.ok) {
         const data = await response.json();
@@ -189,7 +195,8 @@ export default function FloatingWidget({ gatewayUrl = '', initialOpen = false })
   };
 
   return (
-    <div className="sbi-cms-widget-wrapper">
+    <div className={`sbi-cms-widget-wrapper ${position} theme-${theme}`}>
+
       {/* Floating Launcher Button */}
       {!isOpen && (
         <button

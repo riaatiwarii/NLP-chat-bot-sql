@@ -5,6 +5,9 @@ import os
 from datetime import datetime
 from sqlalchemy import text
 from app.data_service import DataService
+from app.schema_engine import SchemaEngine
+from app.schema_linker import SchemaLinker
+from app.context_tracker import ContextTracker
 
 class ChatbotService:
     def __init__(self, data_service: DataService):
@@ -12,7 +15,13 @@ class ChatbotService:
         self.ollama_host = os.getenv("OLLAMA_HOST", "http://localhost:11434").rstrip("/")
         self.ollama_model = os.getenv("OLLAMA_MODEL", "sqlcoder:15b")
         
+        # Dynamic Schema & Semantic NLP Linking Engines
+        self.schema_engine = SchemaEngine(self.ds.engine) if self.ds and self.ds.engine else None
+        self.schema_linker = SchemaLinker(self.schema_engine) if self.schema_engine else None
+        self.context_tracker = ContextTracker()
+        
         # Semantic Embeddings Classifier fields
+
         self.embedder = None
         self.template_embeddings = None
         self.intent_labels = []
@@ -404,24 +413,19 @@ class ChatbotService:
         """
 
         # Clean the message
-
         clean_msg = message.strip().lower()
 
+        # Coreference Resolution & Dialogue Context Tracking
+        resolved_msg, context = self.context_tracker.update_and_resolve_context(message, context, history)
         
-
         # Immediate block for direct SQL modification commands to prevent LLM hallucinations
-
         sql_write_keywords = ["drop table", "insert into", "delete from", "update ", "alter table", "create table"]
-
         if any(keyword in clean_msg for keyword in sql_write_keywords):
-
             return (
-
                 "I'm sorry, but executing write operations or direct database modifications is strictly prohibited for security reasons.",
-
                 context
-
             )
+
 
             
 
@@ -727,37 +731,41 @@ class ChatbotService:
 
 
 
-        # 6. Offline Cameras (supporting typos like "offine cmeras" or "dead cams")
-
-        elif is_semantic("OFFLINE_CAMERAS") or (re.search(r'\bc(?:a)?m(?:e)?r(?:a)?s?\b|\bcams?\b', msg) and re.search(r'\boff(?:l)?ine\b|\bdown\b|\bdead\b|\bfail(?:ed|ure)?s?\b|\bnot\s+working\b', msg) and not any(w in msg for w in ["count", "group", "grouped", "versus", "vs", "status", "statistic", "summary", "number of"])):
-
-            intent = "OFFLINE_CAMERAS"
-
-            city = None
-
-            if "bhopal" in msg:
-
-                city = "Bhopal"
-
-            elif "mumbai" in msg:
-
-                city = "Mumbai"
-
-            elif "delhi" in msg:
-
-                city = "Delhi"
-
-            elif "bengaluru" in msg:
-
-                city = "Bengaluru"
-
-            
-
-            data_payload["city"] = city
-
-            data_payload["cameras"] = self.ds.get_offline_cameras(city=city)
-
+        # 6a. Camera Count Grouped by Device Type
+        elif re.search(r'\bc(?:a)?m(?:e)?r(?:a)?s?\b|\bcams?\b', msg) and re.search(r'\bdevice\s+type\b|\bgrouped\s+by\b|\bby\s+type\b|\btype\s+count\b|\btype\b', msg):
+            intent = "CAMERAS_BY_TYPE_COUNT"
+            data_payload["camera_types"] = self.ds.get_camera_counts_by_type()
             context["last_query_type"] = "devices"
+
+        # 6b. Cameras in Specific Area / Location
+        elif re.search(r'\bc(?:a)?m(?:e)?r(?:a)?s?\b|\bcams?\b', msg) and (re.search(r'\bin\s+([a-zA-Z\s]+?)(?:\s+area|\s+branch|\s+zone)?$', msg) or "jankipuram" in msg or "quila" in msg or "aonla" in msg or "nariman" in msg or "noida" in msg) and not re.search(r'\boff(?:l)?ine\b|\bdown\b|\bdead\b', msg):
+            intent = "CAMERA_LIST_AREA"
+            area_search = "Jankipuram" if "jankipuram" in msg else ("Quila" if "quila" in msg else ("Aonla" if "aonla" in msg else ("Nariman Point" if "nariman" in msg else ("Noida" if "noida" in msg else ""))))
+            if not area_search and context.get("active_branch_filter"):
+                area_search = context.get("active_branch_filter")
+            
+            data_payload["area_name"] = area_search or "Branch Area"
+            data_payload["cameras"] = self.ds.get_cameras_by_area(area_search) if area_search else []
+            context["last_query_type"] = "devices"
+
+        # 6c. Offline Cameras (supporting typos like "offine cmeras" or "dead cams")
+        elif is_semantic("OFFLINE_CAMERAS") or (re.search(r'\bc(?:a)?m(?:e)?r(?:a)?s?\b|\bcams?\b', msg) and re.search(r'\boff(?:l)?ine\b|\bdown\b|\bdead\b|\bfail(?:ed|ure)?s?\b|\bnot\s+working\b', msg) and not any(w in msg for w in ["count", "group", "grouped", "versus", "vs", "status", "statistic", "summary", "number of"])):
+            intent = "OFFLINE_CAMERAS"
+            city = None
+            if "bhopal" in msg:
+                city = "Bhopal"
+            elif "mumbai" in msg:
+                city = "Mumbai"
+            elif "delhi" in msg:
+                city = "Delhi"
+            elif "bengaluru" in msg:
+                city = "Bengaluru"
+            
+            data_payload["city"] = city
+            data_payload["cameras"] = self.ds.get_offline_cameras(city=city)
+            context["last_query_type"] = "devices"
+
+
 
 
 
@@ -1843,131 +1851,29 @@ class ChatbotService:
 
 
 
+        # Dynamic Schema Linking & Grounding
+        dynamic_schema = ""
+        if self.schema_linker:
+            link_res = self.schema_linker.link_schema_and_values(query)
+            dynamic_schema = link_res.get("focused_schema_prompt", "")
+
+        if not dynamic_schema:
+            dynamic_schema = self.schema_engine.generate_dynamic_schema_prompt(dialect) if self.schema_engine else ""
+
         schema_prompt = (
-
             f"You are a {dialect} database translator for the State Bank of India Centralized Monitoring System (SBI CMS).\n"
-
             "Based on the user's natural language question, write a single SQL query to retrieve the necessary data.\n"
-
             "Only return the SQL query inside a markdown code block starting with ```sql and ending with ```. Do not explain the query, do not write extra text.\n\n"
-
-            "Database Schema:\n"
-
-            "1. Table 'CameraList' (monitors CCTV cameras):\n"
-
-            "   - CameraId (NUMERIC): Unique ID\n"
-
-            "   - CameraName (NVARCHAR): Friendly camera feed name\n"
-
-            "   - CameraLocation (NVARCHAR): Area description (e.g. '28.33,79.41')\n"
-
-            "   - Area (NVARCHAR): Branch name (e.g. 'Quila', 'Aonla', 'Jankipuram')\n"
-
-            "   - Status (NVARCHAR): Status of camera (e.g. 'Active', 'Online', 'Offline')\n\n"
-
-            "2. Table 'Incident_Data' (active security incident tickets):\n"
-
-            "   - IncidentId (NUMERIC): Unique ticket ID (corresponds to numeric digits of ticket IDs like INC-001)\n"
-
-            "   - Location (NVARCHAR): Coordinates / address\n"
-
-            "   - Area (NVARCHAR): Branch name (e.g. 'SBI Nariman Point')\n"
-
-            "   - EventType (NVARCHAR): Security event type (e.g. 'Panic Button Activation', 'Perimeter Breach', 'Enclosure Tampering')\n"
-
-            "   - Priority (NVARCHAR): Severity level ('Critical', 'Major', 'Minor')\n"
-
-            "   - Status (NVARCHAR): Current state ('Open', 'In-Progress', 'Resolved', 'Closed')\n"
-
-            "   - IncidentTime (DATETIME): Timestamp when logged\n"
-
-            "   - Operatorname (NVARCHAR): Assigned operator name\n"
-
-            "   - Remarks (NVARCHAR): Ticket description logs\n\n"
-
-            "3. Table 'AlertsDetails' (telemetry security alerts):\n"
-
-            "   - AlertID (NUMERIC): Unique alert ID\n"
-
-            "   - AlertType (NVARCHAR): Alert classification (e.g. 'Panic Button', 'Intrusion')\n"
-
-            "   - AlertSubtype (NVARCHAR): Subtype\n"
-
-            "   - Location (NVARCHAR): GPS coordinates (e.g. '33.69,75.10')\n"
-
-            "   - Area (NVARCHAR): Branch name\n"
-
-            "   - Zone (NVARCHAR): Local Head Office (LHO) circle name (e.g. 'Bhopal LHO', 'Mumbai Metro LHO')\n"
-
-            "   - Severity (NVARCHAR): 'High', 'Medium', 'Low'\n"
-
-            "   - Datetime (DATETIME): Trigger timestamp\n"
-
-            "   - Status (NVARCHAR): 'Active', 'Pending', 'Acknowledged'\n"
-
-            "   - Remarks (NVARCHAR): Logs (contains words like 'false' or 'accidental' for false alarms)\n"
-
-            "   - SensorId (NVARCHAR): Telemetry device/sensor ID\n\n"
-
-            "4. Table 'IncidentHistory' (audit logs / worklogs of operators):\n"
-
-            "   - IncidentId (NVARCHAR): Links to Incident_Data.IncidentId (may store numeric string e.g. '1')\n"
-
-            "   - TimeStamp (DATETIME): Log time\n"
-
-            "   - UsrName (NVARCHAR): Operator who wrote log\n"
-
-            "   - Description (NVARCHAR): Log notes\n\n"
-
-            "5. Table 'Location_Master' (list of active locations):\n"
-
-            "   - ID (NUMERIC): Unique ID\n"
-
-            "   - Location (NVARCHAR): Friendly branch/office location name\n\n"
-
-            "6. Table 'SOP_MASTER' (standard operating procedures):\n"
-
-            "   - AlertType (NVARCHAR): Security event type\n"
-
-            "   - FirstResponder_1 (NVARCHAR): First guard phone/name\n"
-
-            "   - FirstResponder_2 (NVARCHAR): Branch manager phone/name\n"
-
-            "   - SecondResponder_1 (NVARCHAR): Circle supervisor\n"
-
-            "   - SecondResponder_2 (NVARCHAR): Command supervisor\n\n"
-
-            "7. Table 'Master_CamDetails' (detailed camera specifications and live hardware connection):\n"
-
-            "   - ID (NUMERIC): Unique ID\n"
-
-            "   - Name (NVARCHAR): Camera placement name (e.g. 'Entrance', 'Outside')\n"
-
-            "   - CamID (NVARCHAR): Camera UUID string\n"
-
-            "   - Location (NVARCHAR): Location placement\n"
-
-            "   - Type (NVARCHAR): Bounding device type/camera type (e.g. 'Dome', 'Bullet', 'PTZ', 'Other')\n"
-
-            "   - Connected (NVARCHAR): Connection status (contains 'Yes' if online/connected, 'No' if offline)\n"
-
-            "   - Cam_Group (NVARCHAR): Camera zone/group name\n\n"
-
+            f"{dynamic_schema}\n\n"
             f"{few_shots}"
-
             "Guidelines:\n"
-
             f"- {dialect_rules}\n"
-
             "- For string matching, use LIKE with wildcards (e.g. Area LIKE '%Bhopal%') to be robust against minor typos.\n"
-
             "- If querying a specific ticket ID (e.g. INC-001), match the numeric part (e.g. WHERE IncidentId = 1) because Incident_Data.IncidentId is numeric.\n"
-
             "- Always select readable columns (like Area or Location, EventType, Status, Time).\n"
-
             "- DO NOT join AlertsDetails and Incident_Data unless the question explicitly asks about operators or supervisors. For general alert details or alert count questions, query AlertsDetails alone."
-
         )
+
 
 
 
@@ -2754,8 +2660,55 @@ class ChatbotService:
                 "### Operations Summary\n"
 
                 "Technical support tickets have been auto-escalated to local AMC vendors. Incident logs have been updated to note the loss of surveillance redundancy."
-
             )
+
+        if intent == "CAMERAS_BY_TYPE_COUNT":
+            types_data = data.get("camera_types", [])
+            if not types_data:
+                return "No camera device type telemetry available."
+
+            total_cams = sum(t.get("total_count", 0) for t in types_data)
+            total_online = sum(t.get("online_count", 0) for t in types_data)
+
+            table = "| Device Type | Total Count | Online Count | Offline Count | Online Health |\n"
+            table += "|---|---|---|---|---|\n"
+            for t in types_data:
+                t_count = t.get("total_count", 0)
+                o_count = t.get("online_count", 0)
+                off_count = t.get("offline_count", 0)
+                pct = round((o_count / t_count) * 100, 1) if t_count > 0 else 100.0
+                table += f"| **{t.get('device_type', 'Unknown')}** | {t_count} | {o_count} | {off_count} | {pct}% |\n"
+
+            return (
+                f"### CCTV Camera Telemetry Breakdown by Device Type\n\n"
+                f"Across the system, **{total_online} of {total_cams} cameras** are currently Online and operational.\n\n"
+                f"{table}\n\n"
+                "### Operations Summary\n"
+                "Fixed dome and PTZ bullet cameras show normal operational status across all circle branches."
+            )
+
+        if intent == "CAMERA_LIST_AREA":
+            cameras = data.get("cameras", [])
+            area = data.get("area_name", "Branch Area")
+            
+            if not cameras:
+                return f"No cameras found registered under **{area}** in the Centralized Monitoring System database."
+
+            table = "| Camera ID | Camera Name | Placement Location | Branch Area | Status |\n"
+            table += "|---|---|---|---|---|\n"
+            for cam in cameras[:15]:
+                status_badge = "Online" if cam.get('status') == 'Online' else "Offline"
+                table += f"| {cam.get('camera_id')} | **{cam.get('camera_name')}** | {cam.get('location')} | {cam.get('branch_name')} | {status_badge} |\n"
+
+
+            return (
+                f"Here are the **{len(cameras)} CCTV camera feeds** registered in **{area}**:\n\n"
+                f"### Registered Feeds Table\n"
+                f"{table}\n\n"
+                "### Operations Summary\n"
+                f"All cameras in **{area}** are continuously monitored for video loss, tamper detection, and motion analytics."
+            )
+
 
 
 

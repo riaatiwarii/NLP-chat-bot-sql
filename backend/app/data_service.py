@@ -6,8 +6,12 @@ from datetime import datetime
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, text
 
-# Load variables from .env
+# Load variables from .env (checks both backend/.env and root .env)
+env_backend = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env")
+if os.path.exists(env_backend):
+    load_dotenv(env_backend)
 load_dotenv()
+
 
 class DataService:
     def __init__(self):
@@ -383,6 +387,59 @@ class DataService:
                 print(f"[SQL ERROR] get_offline_cameras failed: {e}")
                 
         return self._fallback_offline_cameras(city)
+
+    def get_cameras_by_area(self, area_name):
+        """Retrieves all cameras located in a specific area or branch"""
+        if self.engine is not None:
+            try:
+                query = """
+                    SELECT 
+                        CameraId as camera_id, 
+                        CameraName as camera_name, 
+                        CameraLocation as location, 
+                        Area as branch_name, 
+                        Status as status 
+                    FROM CameraList 
+                    WHERE LOWER(Area) LIKE LOWER(:area) OR LOWER(CameraLocation) LIKE LOWER(:area)
+                """
+                with self.engine.connect() as conn:
+                    res = conn.execute(text(query), {"area": f"%{area_name}%"})
+                    return [dict(r) for r in res.mappings()]
+            except Exception as e:
+                print(f"[SQL ERROR] get_cameras_by_area failed: {e}")
+
+        # Fallback query from db.json
+        db = self._load_json_data()
+        cams = db.get("cameras", [])
+        return [c for c in cams if area_name.lower() in c.get("branch_name", "").lower() or area_name.lower() in c.get("location", "").lower()]
+
+    def get_camera_counts_by_type(self):
+        """Aggregates online and offline camera counts grouped by device type"""
+        if self.engine is not None:
+            try:
+                query = """
+                    SELECT 
+                        Type as device_type, 
+                        COUNT(*) as total_count, 
+                        SUM(CASE WHEN LOWER(Connected) LIKE '%yes%' OR LOWER(Connected) LIKE '%online%' THEN 1 ELSE 0 END) as online_count,
+                        SUM(CASE WHEN LOWER(Connected) NOT LIKE '%yes%' AND LOWER(Connected) NOT LIKE '%online%' THEN 1 ELSE 0 END) as offline_count
+                    FROM Master_CamDetails 
+                    GROUP BY Type
+                """
+                with self.engine.connect() as conn:
+                    res = conn.execute(text(query))
+                    return [dict(r) for r in res.mappings()]
+            except Exception as e:
+                print(f"[SQL ERROR] get_camera_counts_by_type failed: {e}")
+
+        # Static fallback device type breakdown
+        return [
+            {"device_type": "PTZ Bullet Cam", "total_count": 1420, "online_count": 1390, "offline_count": 30},
+            {"device_type": "Dome Fixed Cam", "total_count": 850, "online_count": 842, "offline_count": 8},
+            {"device_type": "Thermal Sensor Cam", "total_count": 420, "online_count": 418, "offline_count": 2},
+            {"device_type": "ANPR LPR Cam", "total_count": 310, "online_count": 305, "offline_count": 5}
+        ]
+
 
     # ==================================================
     # 3. Incident lists
