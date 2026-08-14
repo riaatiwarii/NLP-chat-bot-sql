@@ -724,14 +724,17 @@ class DataService:
                 """
                 with self.engine.connect() as conn:
                     res = conn.execute(text(query))
-                    return [dict(r) for r in res.mappings()]
+                    results = [dict(r) for r in res.mappings()]
+                    if results:
+                        return results
             except Exception as e:
                 print(f"[SQL ERROR] get_operator_performance failed: {e}")
                 
-        # Local JSON aggregator fallback
+        # Local JSON aggregator fallback / operator registry
         db = self._load_json_data()
         incidents = db.get("incidents", [])
         operators = db.get("operators", [])
+
         
         stats = {}
         for op in operators:

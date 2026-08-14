@@ -853,11 +853,11 @@ class ChatbotService:
 
 
 
-        # 13. Operator Performance (supporting typos like "oprator" and "leaderboard")
-
-        elif is_semantic("OPERATOR_PERFORMANCE") or (re.search(r'\bop(?:e)?rat(?:o|e)?rs?\b|\bstaff\b|\bpersonnel\b|\bpeoples?\b|\bleaderboard\b|\branking\b', msg) and any(w in msg for w in ["most", "highest", "best", "handled", "incident", "case", "performance", "leaderboard", "ranking", "stat", "top"])):
-
+        # 13. Operator Performance & Listing (supporting typos like "oprator" and "leaderboard")
+        elif (is_semantic("OPERATOR_PERFORMANCE") or re.search(r'\bop(?:e)?rat(?:o|e)?rs?\b|\bstaff\b|\bpersonnel\b|\bpeoples?\b|\bleaderboard\b|\branking\b', msg)) and not (re.search(r'\b(priya|aarav|bhavana|karan|rohan|neha)\b', msg) or any(w in msg for w in ["assigned to", "assigned operator", "assigned", "workload"])):
             intent = "OPERATOR_PERFORMANCE"
+
+
 
             data_payload["operators"] = self.ds.get_operator_performance()
 
