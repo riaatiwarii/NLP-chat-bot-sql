@@ -2,7 +2,7 @@
 .env
 *.env
 .env.*
-
+test/
 # Python bytecode & runtime cache
 __pycache__/
 *.py[cod]

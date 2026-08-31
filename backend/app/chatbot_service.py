@@ -521,7 +521,8 @@ class ChatbotService:
         if any(w in msg_lower for w in ["system health", "health percentage", "health status", "overall health"]):
             return False
 
-        if any(w in msg_lower for w in ["cctv", "camera", "cameras", "incident", "incidents", "motion detection"]):
+        # Any query asking about alerts, cameras, incidents, counts, totals, or database metrics MUST go to SQL engine
+        if any(w in msg_lower for w in ["alert", "alerts", "cctv", "camera", "cameras", "incident", "incidents", "count", "total", "how many", "number of"]):
             return True
 
         if any(w in msg_lower for w in ["highest number", "highest alerts", "highest alert", "most alerts", "branch has highest"]):
@@ -639,14 +640,59 @@ class ChatbotService:
         loc_match = re.search(r'\b(?:in|at|from|for|of)\s+([a-z0-9\s_-]+)\b', msg_lower)
         if loc_match:
             candidate = loc_match.group(1).strip()
-            stop_words = ["the", "system", "today", "yesterday", "all", "total", "alerts", "cameras", "cctv", "high", "medium", "low", "closed", "pending", "active", "completed", "resolved"]
-            if candidate not in stop_words and len(candidate) >= 3:
+            stop_words = [
+                "the", "system", "today", "yesterday", "all", "total", "alerts", "alert", "camera", "cameras", "cctv",
+                "high", "medium", "low", "critical", "severe", "major", "minor", "urgent", "emergency", "priority", "severity",
+                "closed", "pending", "active", "completed", "resolved", "acknowledged", "status", "database",
+                "response", "time", "delay", "latency", "sla", "operator", "handled", "workload", "incident", "incidents",
+                "breakdown", "distribution", "category", "type", "event", "zone", "lho", "branch", "location", "area",
+                "month", "week", "year", "date", "number", "count", "percent", "ratio", "share", "severity alert",
+                "high severity", "medium severity", "low severity", "high severity alert", "medium severity alert"
+            ]
+            cand_words = candidate.split()
+            # Discard if candidate contains any stop word or if candidate is not a valid location
+            if not any(sw in candidate for sw in stop_words) and len(candidate) >= 3:
                 return candidate.title()
 
         return None
 
     def _handle_complex_dynamic_query(self, msg: str, context: dict) -> tuple:
         msg_lower = msg.lower().strip()
+
+        # 0.001 Total System Alerts Handler ("count of total alerts", "total alerts", "how many total alerts")
+        is_total_count = (
+            any(phrase in msg_lower for phrase in ["count of total alerts", "total alert count", "total alerts count", "count of alerts", "total number of alerts", "total count of alerts"])
+            or (("alert" in msg_lower or "alerts" in msg_lower) and any(w in msg_lower for w in ["count", "total", "how many", "number of"]) and not any(w in msg_lower for w in ["group", "branch", "severity", "status", "today", "yesterday", "camera", "cctv", "high", "medium", "low", "closed", "pending", "active"]))
+        )
+        if is_total_count:
+            if self.ds.use_sql_server:
+                try:
+                    q = """
+                        SELECT 
+                            COUNT(*) as total_alerts,
+                            SUM(CASE WHEN Status LIKE '%Pending%' THEN 1 ELSE 0 END) as pending_alerts,
+                            SUM(CASE WHEN Status LIKE '%Closed%' THEN 1 ELSE 0 END) as closed_alerts,
+                            SUM(CASE WHEN Status LIKE '%Acknowledged%' THEN 1 ELSE 0 END) as ack_alerts
+                        FROM AlertsDetails
+                    """
+                    with self.ds.engine.connect() as conn:
+                        res = conn.execute(text(q)).mappings().first()
+                        tot = res.get("total_alerts") or 0
+                        pend = res.get("pending_alerts") or 0
+                        closed = res.get("closed_alerts") or 0
+                        ack = res.get("ack_alerts") or 0
+
+                        return (
+                            f"There are a total of **{tot:,} security alerts** registered in the Centralized Monitoring System:\n\n"
+                            f"### System Alert Overview\n"
+                            f"- **Total Alerts**: `{tot:,}`\n"
+                            f"- **Pending / Active**: `{pend:,}` ({round((pend/tot)*100, 2) if tot else 0}%)\n"
+                            f"- **Closed / Resolved**: `{closed:,}` ({round((closed/tot)*100, 2) if tot else 0}%)\n"
+                            f"- **Acknowledged**: `{ack:,}`\n\n"
+                            f"*(Note: Total telemetry alerts registered across all connected monitored branches).* "
+                        ), context
+                except Exception as e:
+                    print(f"[COMPLEX QUERY ERROR] Total alerts query failed: {e}")
 
         # 0.005 Universal Camera Engine ("how many cameras in jankipuram", "list active cameras in aonla", "list all cameras")
         if any(w in msg_lower for w in ["camera", "cameras", "cctv"]):
@@ -749,41 +795,79 @@ class ChatbotService:
                     except Exception as e:
                         print(f"[COMPLEX QUERY ERROR] List cameras query failed: {e}")
 
-        # 0.01 Total Alerts Grouped by Branch Handler ("how many total alerts in the system group them by branches", "branch has highest number of alerts")
-        if (any(w in msg_lower for w in ["group", "grouped", "per branch", "by branch", "by branches"]) and any(w in msg_lower for w in ["alert", "alerts"])) or any(w in msg_lower for w in ["highest number", "highest alerts", "highest alert", "most alerts", "branch has highest"]):
+        # 0.01 Universal Parameter Grouping Engine ("show me todays alert and group them by their severity", "group by status", "breakdown by severity", "alerts per branch")
+        is_group_query = (
+            any(w in msg_lower for w in ["group", "grouped", "grouping", "breakdown", "distribution", "categorize", "split", "wise", "per"])
+            and any(w in msg_lower for w in ["alert", "alerts", "incident", "incidents", "telemetry", "cctv", "camera", "cameras"])
+        ) or any(w in msg_lower for w in ["highest number", "highest alerts", "highest alert", "most alerts", "branch has highest"])
+
+        if is_group_query:
+            # Extract date bounds if present in query
+            d_start_grp, d_end_grp, d_kind_grp = self._extract_dates_from_query(msg_lower)
+            date_where = ""
+            date_params = {}
+            if d_start_grp and d_end_grp:
+                date_where = "WHERE Datetime >= :dt_start AND Datetime <= :dt_end"
+                date_params = {"dt_start": f"{d_start_grp} 00:00:00", "dt_end": f"{d_end_grp} 23:59:59"}
+                date_label = f" for **{d_start_grp}**" if d_start_grp == d_end_grp else f" for the period **{d_start_grp}** to **{d_end_grp}**"
+            else:
+                date_label = " across the system"
+
+            # Determine Grouping Dimension (Severity, Status, Type, Zone, Operator, Branch)
+            if any(w in msg_lower for w in ["severity", "priority", "criticality"]):
+                grp_col = "Severity"
+                grp_label = "Severity Level"
+            elif any(w in msg_lower for w in ["status", "state"]):
+                grp_col = "Status"
+                grp_label = "Alert Status"
+            elif any(w in msg_lower for w in ["type", "event", "category"]):
+                grp_col = "AlertType"
+                grp_label = "Alert Event Type"
+            elif any(w in msg_lower for w in ["zone", "lho", "region"]):
+                grp_col = "Zone"
+                grp_label = "Monitoring Zone"
+            elif any(w in msg_lower for w in ["operator", "user", "staff"]):
+                grp_col = "Operatorname"
+                grp_label = "Assigned Operator"
+            else:
+                grp_col = "TRIM(COALESCE(Area, Location))"
+                grp_label = "Monitored Branch / Area"
+
             if self.ds.use_sql_server:
                 try:
-                    q = """
+                    q = f"""
                         SELECT 
-                            TRIM(COALESCE(Area, Location)) as branch_name, 
+                            {grp_col} as group_key, 
                             COUNT(*) as total_alerts,
                             SUM(CASE WHEN Status LIKE '%Pending%' THEN 1 ELSE 0 END) as pending_alerts,
-                            SUM(CASE WHEN Status LIKE '%Closed%' THEN 1 ELSE 0 END) as closed_alerts,
-                            SUM(CASE WHEN Status LIKE '%Acknowledged%' THEN 1 ELSE 0 END) as ack_alerts
+                            SUM(CASE WHEN Status LIKE '%Closed%' THEN 1 ELSE 0 END) as closed_alerts
                         FROM AlertsDetails
-                        GROUP BY TRIM(COALESCE(Area, Location))
+                        {date_where}
+                        GROUP BY {grp_col}
                         ORDER BY total_alerts DESC
                     """
                     with self.ds.engine.connect() as conn:
-                        rows = conn.execute(text(q)).mappings().all()
+                        rows = conn.execute(text(q), date_params).mappings().all()
                         tot_all = sum(r['total_alerts'] for r in rows)
-                        top_br = rows[0]['branch_name'] if rows else "AO_NOIDA"
+                        top_key = rows[0]['group_key'] if rows else "N/A"
                         top_cnt = rows[0]['total_alerts'] if rows else 0
                         top_pct = round((top_cnt / tot_all) * 100, 2) if tot_all else 0
 
-                        br_table = "| Monitored Branch / Area | Total Alerts Registered | Pending Alerts | Closed / Resolved | Acknowledged | Share |\n|---|---|---|---|---|---|\n"
+                        table_header = f"| {grp_label} | Total Alerts Registered | Pending Alerts | Closed / Resolved | Share |\n|---|---|---|---|---|\n"
+                        table_rows = ""
                         for r in rows:
                             pct = round((r['total_alerts'] / tot_all) * 100, 2)
-                            br_table += f"| **{r['branch_name']}** | **{r['total_alerts']:,}** | {r['pending_alerts']:,} | {r['closed_alerts']:,} | {r['ack_alerts']:,} | {pct}% |\n"
+                            key_name = r['group_key'] or 'Unassigned'
+                            table_rows += f"| **{key_name}** | **{r['total_alerts']:,}** | {r['pending_alerts']:,} | {r['closed_alerts']:,} | {pct}% |\n"
 
                         return (
-                            f"The branch with the highest number of alerts is **{top_br}** with **{top_cnt:,} alerts** (representing **{top_pct}%** of the system's **{tot_all:,} total alerts** across **{len(rows)} monitored branches**):\n\n"
-                            f"### Total Alerts Grouped by Monitored Branch\n{br_table}\n"
+                            f"Alert breakdown grouped by **{grp_label}**{date_label} (total **{tot_all:,} alerts** across **{len(rows)} categories**):\n\n"
+                            f"### Security Alerts Grouped by {grp_label}\n{table_header}{table_rows}\n"
                             f"### Operations Summary\n"
-                            f"Telemetry volume distribution: **AO_NOIDA** represents the highest alert volume (`67.87%`), followed by **AO_AGRA** (`23.86%`) and **AO_NORTH AND WEST DELHI** (`8.27%`)."
+                            f"Highest category: **{top_key}** representing **{top_cnt:,} alerts** (`{top_pct}%` share of volume{date_label})."
                         ), context
                 except Exception as e:
-                    print(f"[COMPLEX QUERY ERROR] Group by branch query failed: {e}")
+                    print(f"[COMPLEX QUERY ERROR] Parameter grouping query failed: {e}")
 
         # 0. Status & Branch Alert Count Queries ("how many closed alerts are from agra", "how many pending alerts in noida")
         if any(w in msg_lower for w in ["how many", "number of", "count of", "total"]) and any(st in msg_lower for st in ["closed", "pending", "active", "acknowledged"]):
@@ -1178,15 +1262,26 @@ class ChatbotService:
                 except Exception as e:
                     print(f"[COMPLEX QUERY ERROR] Date range query failed: {e}")
 
-        # 3. Single Severity Branch Query ("Show the 5 most recent high-severity alerts in Noida", "List high priority alerts in AO_NORTH AND WEST DELHI")
+        # 3. Single Severity Branch Query ("how many severe alerts for today", "Show the 5 most recent high-severity alerts in Noida")
         normalized_msg = msg_lower.replace("-", " ")
-        if any(sev in normalized_msg for sev in ["high", "medium", "low"]) and any(w in normalized_msg for w in ["alert", "alerts", "incident", "incidents", "severity", "priority", "recent"]) and not any(w in normalized_msg for w in ["operator", "handled", "slowest", "delay", "ratio", "percent"]):
-            target_sev = "High" if "high" in normalized_msg else ("Low" if "low" in normalized_msg else "Medium")
-            loc_filter = self._extract_location_filter(normalized_msg, context)
+        sev_triggers = ["high", "medium", "low", "critical", "severe", "major", "minor", "urgent", "dangerous", "emergency", "criticality", "serious", "moderate"]
+        if any(sev in normalized_msg for sev in sev_triggers) and any(w in normalized_msg for w in ["alert", "alerts", "incident", "incidents", "severity", "priority", "recent", "how many", "count", "total"]) and not any(w in normalized_msg for w in ["operator", "handled", "slowest", "delay", "ratio", "percent"]):
+            # Severity Synonym Classifier
+            if any(s in normalized_msg for s in ["high", "critical", "severe", "major", "urgent", "dangerous", "emergency", "criticality", "serious"]):
+                target_sev_sql = "Severity IN ('High', 'Critical')"
+                target_sev_label = "High / Critical"
+            elif any(s in normalized_msg for s in ["medium", "moderate", "normal", "standard", "mid", "intermediate"]):
+                target_sev_sql = "Severity = 'Medium'"
+                target_sev_label = "Medium"
+            else:
+                target_sev_sql = "Severity = 'Low'"
+                target_sev_label = "Low"
 
-            # Dynamic count extraction (e.g. "5 most recent", "top 5", "10 alerts")
+            loc_filter = self._extract_location_filter(normalized_msg, context)
+            d_start_sev, d_end_sev, d_kind_sev = self._extract_dates_from_query(normalized_msg)
+
             top_limit = 15
-            cnt_match = re.search(r'\b(?:top|show|list|get|most recent|first)?\s*(\d+)\s*(?:most recent|recent|alerts|incidents|records|high|medium|low)?\b', normalized_msg)
+            cnt_match = re.search(r'\b(?:top|show|list|get|most recent|first)?\s*(\d+)\s*(?:most recent|recent|alerts|incidents|records|high|medium|low|severe)?\b', normalized_msg)
             if cnt_match and cnt_match.group(1):
                 try:
                     parsed_val = int(cnt_match.group(1))
@@ -1197,11 +1292,18 @@ class ChatbotService:
 
             if self.ds.use_sql_server:
                 try:
-                    where_parts = ["Severity = :sev"]
-                    params = {"sev": target_sev}
+                    where_parts = [target_sev_sql]
+                    params = {}
                     if loc_filter:
                         where_parts.append("(Area LIKE :loc OR Location LIKE :loc)")
                         params["loc"] = f"%{loc_filter}%"
+
+                    date_str = ""
+                    if d_start_sev and d_end_sev:
+                        where_parts.append("Datetime >= :dt_start AND Datetime <= :dt_end")
+                        params["dt_start"] = f"{d_start_sev} 00:00:00"
+                        params["dt_end"] = f"{d_end_sev} 23:59:59"
+                        date_str = f" for **{d_start_sev}**" if d_start_sev == d_end_sev else f" for **{d_start_sev} to {d_end_sev}**"
 
                     q_cnt = f"""
                         SELECT 
@@ -1230,23 +1332,11 @@ class ChatbotService:
                             tbl = "| Alert ID | Type | Branch Name | Severity | Datetime | Status |\n|---|---|---|---|---|---|\n"
                             for r in rows:
                                 tbl += f"| {r['AlertID']} | {r['AlertType']} | {r['branch_name']} | **{r['Severity']}** | {r['Datetime']} | {r['Status']} |\n"
-                            
-                            is_count_query = any(w in normalized_msg for w in ["total count", "count of", "how many", "number of", "total"])
-                            if is_count_query:
-                                return (
-                                    f"Found a total of **{tot_match:,} `{target_sev}` severity security alerts** in the database{loc_str}:\n\n"
-                                    f"### Severity Status Breakdown\n"
-                                    f"- **Pending**: `{pend_cnt:,}` alerts ({round((pend_cnt/tot_match)*100, 2) if tot_match else 0}%)\n"
-                                    f"- **Closed**: `{closed_cnt:,}` alerts ({round((closed_cnt/tot_match)*100, 2) if tot_match else 0}%)\n\n"
-                                    f"### Sample `{target_sev}` Severity Alerts (Showing top {len(rows)})\n{tbl}"
-                                ), context
-                            else:
-                                count_str = f"the **{len(rows)} most recent**" if top_limit != 15 else f"**{len(rows)}**"
-                                return f"Retrieved {count_str} `{target_sev}` priority alerts{loc_str} (out of **{tot_match:,} total**):\n\n{tbl}\n### Operations Summary\nDisplaying matching telemetry alerts ordered by most recent timestamp.", context
+                            return f"Retrieved **{tot_match:,} {target_sev_label} priority alerts**{loc_str}{date_str} (**{pend_cnt:,} Pending**, **{closed_cnt:,} Closed**):\n\n{tbl}\n### Operations Summary\nDisplaying recent `{target_sev_label}` priority telemetry flags.", context
                         else:
-                            return f"No **`{target_sev}`** priority alerts{loc_str} were found in the database.", context
+                            return f"No `{target_sev_label}` priority security alerts{loc_str}{date_str} were found in the database.", context
                 except Exception as e:
-                    print(f"[COMPLEX QUERY ERROR] Single severity branch query failed: {e}")
+                    print(f"[COMPLEX QUERY ERROR] Single severity query failed: {e}")
 
         # 4. Branch / Area Exclusion Query ("List alerts excluding AO_AGRA", "excluding Low priority")
         if "except" in msg_lower or "excluding" in msg_lower or "exclude" in msg_lower:
@@ -2221,27 +2311,16 @@ class ChatbotService:
                 try:
 
                     query = """
-
                         SELECT 
-
-                            COALESCE(Area, Location) as branch_name, 
-
+                            TRIM(COALESCE(Area, Location)) as branch_name, 
                             COUNT(*) as alert_count 
-
                         FROM AlertsDetails 
-
                         WHERE AlertType LIKE :alt_type
-
-                        GROUP BY Area, Location
-
+                        GROUP BY TRIM(COALESCE(Area, Location))
                         ORDER BY alert_count DESC
-
                     """
-
                     with self.ds.engine.connect() as conn:
-
                         res = conn.execute(text(query), {"alt_type": f"%{target_type}%"})
-
                         data_payload["branches"] = [dict(r) for r in res.mappings()]
 
                 except Exception as e:

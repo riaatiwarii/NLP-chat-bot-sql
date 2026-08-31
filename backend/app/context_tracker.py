@@ -56,10 +56,16 @@ class ContextTracker:
                 context["last_abstention"] = None
                 return resolved_query, context
 
-        # 4. Result-based Follow-up Context Carry Forward
+        # 4. Result-based Follow-up Context Carry Forward & Comparative Pronouns ("same", "tell me same about todays alerts")
         last_result_ctx = context.get("last_result_context")
+        has_same_ref = bool(re.search(r'\b(same|do the same|tell me same|same for|same about|how about|what about)\b', msg_lower))
+
         if last_result_ctx and not context.get("last_abstention"):
             prev_q = last_result_ctx.get("question", "")
+            if has_same_ref and prev_q:
+                resolved_query = f"{prev_q} (Comparative filter: '{message_text}')"
+                return resolved_query, context
+
             # Detect follow-up phrasing like "what about X", "how about X", "just X", "only X", "show X"
             is_refinement_followup = (
                 re.match(r'^(what about|how about|and|just|only|show|filter by|for)\b', msg_lower)
