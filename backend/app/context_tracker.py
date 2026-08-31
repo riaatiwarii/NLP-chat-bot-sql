@@ -44,7 +44,37 @@ class ContextTracker:
                 branch_name = "Sbi " + branch_name
             context["active_branch_filter"] = branch_name
 
-        # 3. Coreference Resolution for Follow-up Queries
+        # 3. Disambiguation Resolution for Abstention Follow-ups
+        last_abstention = context.get("last_abstention")
+        if last_abstention and context.get("last_query_type") == "abstention":
+            orig_query = last_abstention.get("query", "")
+            candidates = last_abstention.get("candidates", [])
+            # Check if user is specifying a table or clarifying intent
+            if any(w in msg_lower for w in ["meant", "mean", "table", "use", "instead", "want", "show"]) or any(c.lower() in msg_lower for c in candidates):
+                resolved_query = f"{orig_query} (Focus specifically on user confirmed context: '{message_text}')"
+                context["last_query_type"] = None
+                context["last_abstention"] = None
+                return resolved_query, context
+
+        # 4. Result-based Follow-up Context Carry Forward
+        last_result_ctx = context.get("last_result_context")
+        if last_result_ctx and not context.get("last_abstention"):
+            prev_q = last_result_ctx.get("question", "")
+            # Detect follow-up phrasing like "what about X", "how about X", "just X", "only X", "show X"
+            is_refinement_followup = (
+                re.match(r'^(what about|how about|and|just|only|show|filter by|for)\b', msg_lower)
+                or any(w in msg_lower for w in ["last week", "yesterday", "today", "critical", "high priority", "low priority", "medium", "closed", "pending"])
+                or len(msg_lower.split()) <= 4
+            )
+            
+            # Avoid re-enriching if it's a completely explicit new topic
+            is_new_topic = any(w in msg_lower for w in ["sop", "procedure", "help", "list branches", "all lhos", "who is operator", "what percentage"])
+            
+            if is_refinement_followup and not is_new_topic and prev_q and prev_q.lower() not in msg_lower:
+                resolved_query = f"{prev_q} (Refinement filter: '{message_text}')"
+                return resolved_query, context
+
+        # 5. Coreference Resolution for Follow-up Queries with Pronouns
         resolved_query = message_text
 
         # Check for implicit pronouns or follow-up indicators ("them", "this branch", "those alerts")
@@ -65,3 +95,4 @@ class ContextTracker:
                 resolved_query = f"{message_text} ({', '.join(additions)})"
 
         return resolved_query, context
+

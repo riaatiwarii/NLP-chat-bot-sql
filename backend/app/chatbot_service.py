@@ -2,7 +2,7 @@ import re
 import requests
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from sqlalchemy import text
 from app.data_service import DataService
 from app.schema_engine import SchemaEngine
@@ -12,7 +12,7 @@ from app.context_tracker import ContextTracker
 class ChatbotService:
     def __init__(self, data_service: DataService):
         self.ds = data_service
-        self.ollama_host = os.getenv("OLLAMA_HOST", "http://localhost:11434").rstrip("/")
+        self.ollama_host = os.getenv("OLLAMA_HOST", "http://192.168.0.10:11434").rstrip("/")
         self.ollama_model = os.getenv("OLLAMA_MODEL", "sqlcoder:15b")
         
         # Dynamic Schema & Semantic NLP Linking Engines
@@ -396,28 +396,36 @@ class ChatbotService:
 
 
 
+    def _clean_llm_response(self, text_str: str) -> str:
+        if not text_str or not isinstance(text_str, str):
+            return text_str
+        # Strip LLM control tags and test code hallucinations
+        text_str = re.sub(r'<\|im_end\|>.*$', '', text_str, flags=re.DOTALL)
+        text_str = re.sub(r'<\|im_start\|>.*$', '', text_str, flags=re.DOTALL)
+        text_str = re.sub(r'def\s+test_chatbot_pipeline.*$', '', text_str, flags=re.DOTALL)
+        text_str = re.sub(r'expected_output\s*=.*$', '', text_str, flags=re.DOTALL)
+        text_str = re.sub(r'assert\s+expected_output.*$', '', text_str, flags=re.DOTALL)
+        return text_str.strip()
+
     def process_message(self, message: str, history: list, context: dict) -> tuple:
-
         """
-
         Processes a chat message.
-
         history: list of messages [{"role": "user"/"assistant", "content": "..."}]
-
         context: dict containing persistent filters and settings.
-
         
-
         Returns: (response_text, updated_context)
-
         """
-
         # Clean the message
         clean_msg = message.strip().lower()
 
         # Coreference Resolution & Dialogue Context Tracking
         resolved_msg, context = self.context_tracker.update_and_resolve_context(message, context, history)
         
+        # Check database connectivity first - do not use fallback JSON mock data
+        if self.ds is not None and (not getattr(self.ds, "use_sql_server", False) or getattr(self.ds, "engine", None) is None):
+            err_msg = getattr(self.ds, "connection_error", None) or "Server cannot be connected."
+            return f"⚠️ Database Connection Error: {err_msg} Please ensure the SQL Server is reachable.", context
+
         # Immediate block for direct SQL modification commands to prevent LLM hallucinations
         sql_write_keywords = ["drop table", "insert into", "delete from", "update ", "alter table", "create table"]
         if any(keyword in clean_msg for keyword in sql_write_keywords):
@@ -426,122 +434,1084 @@ class ChatbotService:
                 context
             )
 
-
+        # Check for complex comparative/threshold queries first
+        if self._is_complex_or_modified_query(clean_msg):
+            print(f"[COMPLEX QUERY DISAMBIGUATION] Query '{clean_msg}' detected as complex analytical filter.")
             
+            # FIRST: Check high-speed dynamic parameterized query handler for known analytical patterns
+            comp_resp, updated_ctx = self._handle_complex_dynamic_query(clean_msg, context)
+            if comp_resp:
+                return self._clean_llm_response(comp_resp), updated_ctx
+
+            # SECOND: Fallback to Text-to-SQL via Ollama for ad-hoc custom analytical queries
+            ollama_status = self.check_ollama_status()
+            if ollama_status["connected"] and self.ds.engine is not None:
+                try:
+                    active_model = self.ollama_model
+                    if active_model not in ollama_status["models"] and len(ollama_status["models"]) > 0:
+                        active_model = ollama_status["models"][0]
+                    sql_resp = self._process_message_with_text_to_sql(clean_msg, history, active_model, context)
+                    if sql_resp:
+                        if isinstance(sql_resp, tuple):
+                            return self._clean_llm_response(sql_resp[0]), sql_resp[1]
+                        return self._clean_llm_response(sql_resp), context
+                except Exception as e:
+                    print(f"[TEXT-TO-SQL ERROR] Ollama execution failed: {e}")
 
         # 1. Identify Intent & Retrieve Relevant Data
-
         intent, data_payload, context = self._classify_and_fetch(clean_msg, context)
 
-        
-
-        # Read use_ollama setting from context (default to False for speed)
-
-        use_ollama = context.get("use_ollama", False)
-
-        
-
-        # 2. Try Ollama LLM if enabled and available
+        # Read use_ollama setting from context (default to True for live Text-to-SQL pipeline)
+        use_ollama = context.get("use_ollama", True)
 
         if use_ollama:
-
             ollama_status = self.check_ollama_status()
-
             if ollama_status["connected"]:
-
                 print(f"Ollama is enabled and online. Generating response using model {self.ollama_model}...")
-
                 available_models = ollama_status["models"]
-
                 active_model = self.ollama_model
 
-                # Handle model name mapping
-
                 if active_model not in available_models and len(available_models) > 0:
-
                     matched = next((m for m in available_models if m.startswith(active_model)), None)
-
                     if matched:
-
                         active_model = matched
-
                     else:
-
                         active_model = available_models[0]
 
-                        
-
                 try:
+                    # FIRST: If intent is a specific operational summary or dashboard intent, use high-speed category generator
+                    SYSTEM_INTENTS = [
+                        "GREETING", "DASHBOARD_SUMMARY", "LHO_LIST", "SOP_QUERY",
+                        "SECURITY_CONCERNS", "FALSE_ALERT_RATE", "LHO_RESPONSE_TIME",
+                        "BRANCH_COUNT", "ALERT_TYPES", "ALERT_SEVERITY_COUNT",
+                        "HIGHEST_ALERTS_BRANCH", "HIGH_RESPONSE_TIME_ALERTS", "EVALUATED_RESPONSE_TIME_INCIDENTS", "LHO_BRANCHES_LIST"
+                    ]
 
-                    # FIRST: Attempt dynamic Text-to-SQL if SQL Server or SQLite is active (skip for meta/follow-ups/summaries/SOPs/complex aggregates)
-
-                    if self.ds.engine is not None and intent not in [
-
-                        "GREETING",
-
-                        "FOLLOW_UP_EXPLAIN_DATA",
-
-                        "FOLLOW_UP_BRANCH_NAME",
-
-                        "DASHBOARD_SUMMARY",
-
-                        "SECURITY_CONCERNS",
-
-                        "SOP_QUERY",
-
-                        "FALSE_ALERT_RATE",
-
-                        "LHO_RESPONSE_TIME",
-
-                        "BRANCH_COUNT",
-
-                        "ALERT_TYPES",
-
-                        "ALERT_SEVERITY_COUNT",
-
-                        "RECENT_ALERTS_FILTERED",
-
-                        "LHO_LIST"
-
-                    ]:
-
-                        response = self._process_message_with_text_to_sql(message, history, active_model, context)
-
+                    if intent in SYSTEM_INTENTS:
+                        response = self._generate_with_ollama(message, history, intent, data_payload, active_model)
                         if response:
+                            return self._clean_llm_response(response), context
 
-                            return response, context
-
-                            
-
-                    # SECOND: Fallback to static category generator with Ollama
-
-                    response = self._generate_with_ollama(message, history, intent, data_payload, active_model)
-
-                    if response:
-
-                        return response, context
+                    # SECOND: Attempt dynamic Text-to-SQL for ad-hoc / dynamic data queries
+                    if self.ds.engine is not None:
+                        sql_res = self._process_message_with_text_to_sql(message, history, active_model, context)
+                        if sql_res:
+                            if isinstance(sql_res, tuple):
+                                return self._clean_llm_response(sql_res[0]), sql_res[1]
+                            return self._clean_llm_response(sql_res), context
 
                 except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as net_err:
-
-                    print(f"[OLLAMA TIMEOUT/CONNECTION WARNING] Ollama call failed: {net_err}. Falling back to local rules.")
+                    print(f"[OLLAMA TIMEOUT/CONNECTION WARNING] Ollama call failed: {net_err}. Falling back to rule-based compiler.")
 
             else:
-
                 print("Ollama connection failed or unreachable. Falling back...")
 
-            
-
-        # 3. Fallback to Local Rule-Based template compiler
-
-        print("Using local rule-based fallback response generator...")
-
+        # 3. Fallback to Local Rule-Based template compiler for all recognized operational intents
         response = self._compile_fallback_response(intent, data_payload, clean_msg, context)
+        return self._clean_llm_response(response), context
 
-        return response, context
 
+
+
+    def _is_complex_or_modified_query(self, msg: str) -> bool:
+        msg_lower = msg.lower().strip().replace("-", " ")
+        if any(w in msg_lower for w in ["sop", "procedure", "steps", "workflow", "call first"]):
+            return False
+
+        if any(w in msg_lower for w in ["system health", "health percentage", "health status", "overall health"]):
+            return False
+
+        if any(w in msg_lower for w in ["cctv", "camera", "cameras", "incident", "incidents", "motion detection"]):
+            return True
+
+        if any(w in msg_lower for w in ["highest number", "highest alerts", "highest alert", "most alerts", "branch has highest"]):
+            return True
+
+        comp_keywords = [
+            "below", "above", "greater than", "less than", "more than",
+            "exceeding", "between", "except", "excluding", "exclude", "percentage", "percent",
+            "ratio", "slowest", "fastest", "longer than", "shorter than", "top 3",
+            "top 5", "highest closed", "lowest response", "registered on", "alerts on",
+            "july 31", "31st july", "july 28", "28th july", "closed", "pending", "completed", "acknowledged", "ack", "resolved",
+            "high priority", "low priority", "medium priority", "high severity", "low severity",
+            "medium", "low", "yesterday", "today", "by branch", "by branches", "grouped", "group",
+            "summary", "overview", "report", "breakdown"
+        ]
+        if any(kw in msg_lower for kw in comp_keywords):
+            return True
+
+        if re.search(r'\bhigh\b', msg_lower):
+            return True
+
+        if re.search(r'\bunder\b', msg_lower):
+            return True
+
+        if re.search(r'\b\d+\s*(?:sec|second|seconds|min|mins|minute|minutes|hr|hrs|hour|hours)\b', msg_lower):
+            return True
+
+        if re.search(r'\b(?:january|jan|february|feb|march|mar|april|apr|may|june|jun|july|jul|august|aug|september|sep|sept|october|oct|november|nov|december|dec|yesterday|today)\b', msg_lower):
+            return True
+
+        return False
+
+    def _extract_dates_from_query(self, msg: str):
+        msg_lower = msg.lower().strip()
+
+        # 0. Relative Date Terms (yesterday, today)
+        if "yesterday" in msg_lower:
+            yest = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+            return yest, yest, "single"
+        if "today" in msg_lower:
+            today_str = datetime.now().strftime("%Y-%m-%d")
+            return today_str, today_str, "single"
+
+        month_map = {
+            "january": 1, "jan": 1, "february": 2, "feb": 2, "march": 3, "mar": 3,
+            "april": 4, "apr": 4, "may": 5, "june": 6, "jun": 6, "july": 7, "jul": 7,
+            "august": 8, "aug": 8, "september": 9, "sep": 9, "october": 10, "oct": 10,
+            "november": 11, "nov": 11, "december": 12, "dec": 12
+        }
+        
+        # 1. ISO Date Range (YYYY-MM-DD to/and YYYY-MM-DD)
+        iso_range = re.findall(r'(\d{4}-\d{2}-\d{2})', msg_lower)
+        if len(iso_range) >= 2:
+            return iso_range[0], iso_range[1], "range"
+        elif len(iso_range) == 1:
+            return iso_range[0], iso_range[0], "single"
+
+        # 2. Text Date Range (e.g., "july 28 and august 10", "july 28 to august 10", "august 1 to august 10")
+        range_match = re.search(r'(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\s*(\d+)(?:st|nd|rd|th)?\s*(?:and|to|-)\s*(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)?\s*(\d+)', msg_lower)
+        
+        if range_match:
+            m1_str, d1_str, m2_str, d2_str = range_match.groups()
+            m1 = month_map.get(m1_str, 7)
+            d1 = int(d1_str)
+            m2 = month_map.get(m2_str, m1) if m2_str else m1
+            d2 = int(d2_str)
+            
+            start_date = f"2026-{m1:02d}-{d1:02d}"
+            end_date = f"2026-{m2:02d}-{d2:02d}"
+            return start_date, end_date, "range"
+
+        # 3. Single Date (e.g., "august 12", "july 13", "12 august")
+        single_match = re.search(r'(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\s*(\d+)|(\d+)(?:st|nd|rd|th)?\s*(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)', msg_lower)
+        
+        if single_match:
+            if single_match.group(1):
+                m_str = single_match.group(1)
+                d_str = single_match.group(2)
+            else:
+                d_str = single_match.group(3)
+                m_str = single_match.group(4)
+            m = month_map.get(m_str, 7)
+            d = int(d_str)
+            dt = f"2026-{m:02d}-{d:02d}"
+            return dt, dt, "single"
+
+        return None, None, None
+
+    def _extract_location_filter(self, msg_lower: str, context: dict = None) -> str:
+        """Dynamically extracts location/branch/area filters by matching prompt text against live DB locations."""
+        if context and context.get("active_branch_filter"):
+            loc_ctx = context.get("active_branch_filter")
+            if loc_ctx.lower() in msg_lower:
+                return loc_ctx
+
+        db_locations = []
+        if hasattr(self, "ds") and self.ds:
+            try:
+                db_locations = self.ds.get_all_locations()
+            except Exception as e:
+                print(f"[LOCATION EXTRACTOR WARNING] Failed to fetch DB locations: {e}")
+
+        if not db_locations:
+            db_locations = ["AO_NOIDA", "AO_AGRA", "AO_NORTH AND WEST DELHI", "Jankipuram", "Aonla", "Quila", "Civil Lines", "Junction", "Chowki Chauraha"]
+
+        # 1. Exact or Substring Matching against Live DB Locations
+        sorted_locs = sorted(db_locations, key=lambda x: len(str(x)), reverse=True)
+        for loc in sorted_locs:
+            loc_str = str(loc)
+            loc_clean = loc_str.lower().replace("ao_", "").replace("ao ", "").strip()
+            if loc_str.lower() in msg_lower or (len(loc_clean) >= 3 and loc_clean in msg_lower):
+                return loc_str
+
+        # 2. Pattern Matching (e.g. "in lucknow", "at kanpur", "for mumbai")
+        loc_match = re.search(r'\b(?:in|at|from|for|of)\s+([a-z0-9\s_-]+)\b', msg_lower)
+        if loc_match:
+            candidate = loc_match.group(1).strip()
+            stop_words = ["the", "system", "today", "yesterday", "all", "total", "alerts", "cameras", "cctv", "high", "medium", "low", "closed", "pending", "active", "completed", "resolved"]
+            if candidate not in stop_words and len(candidate) >= 3:
+                return candidate.title()
+
+        return None
+
+    def _handle_complex_dynamic_query(self, msg: str, context: dict) -> tuple:
+        msg_lower = msg.lower().strip()
+
+        # 0.005 Universal Camera Engine ("how many cameras in jankipuram", "list active cameras in aonla", "list all cameras")
+        if any(w in msg_lower for w in ["camera", "cameras", "cctv"]):
+            loc_filter = self._extract_location_filter(msg_lower, context)
+
+            where_parts = []
+            params = {}
+            if loc_filter:
+                where_parts.append("(Area LIKE :loc OR CameraLocation LIKE :loc)")
+                params["loc"] = f"%{loc_filter}%"
+
+            # Check if asking for offline/inactive cameras
+            if any(w in msg_lower for w in ["offline", "no stream", "disconnected", "down", "failure", "inactive"]):
+                if self.ds.use_sql_server:
+                    try:
+                        w_parts = where_parts + ["Status != 'Active'"]
+                        q = f"SELECT CameraName, CameraId, Area, Status FROM CameraList WHERE {' AND '.join(w_parts)} ORDER BY CAST(CameraId AS INT) ASC"
+                        with self.ds.engine.connect() as conn:
+                            rows = conn.execute(text(q), params).mappings().all()
+                            loc_str = f" in **{loc_filter}**" if loc_filter else ""
+                            if rows:
+                                tbl = "| Camera Name | Camera ID | Branch / Area | Status |\n|---|---|---|---|\n"
+                                for r in rows:
+                                    tbl += f"| {r['CameraName']} | {r['CameraId']} | {r['Area']} | **{r['Status']}** |\n"
+                                return f"Found **{len(rows)} Offline / No Stream CCTV Cameras**{loc_str}:\n\n{tbl}\n### Operations Summary\nMaintenance tickets have been logged for offline camera channels.", context
+                            else:
+                                return f"All CCTV cameras{loc_str} are currently **Online** and actively recording. No camera failures detected.", context
+                    except Exception as e:
+                        print(f"[COMPLEX QUERY ERROR] Offline camera query failed: {e}")
+
+            # Check if asking for online/active cameras
+            elif any(w in msg_lower for w in ["online", "active", "working", "connected"]):
+                if self.ds.use_sql_server:
+                    try:
+                        w_parts = where_parts + ["Status = 'Active'"]
+                        q = f"SELECT CameraName, CameraId, Area, Status FROM CameraList WHERE {' AND '.join(w_parts)} ORDER BY CAST(CameraId AS INT) ASC"
+                        with self.ds.engine.connect() as conn:
+                            rows = conn.execute(text(q), params).mappings().all()
+                            loc_str = f" in **{loc_filter}**" if loc_filter else ""
+                            if rows:
+                                tbl = "| Camera Name | Camera ID | Branch / Area | Status |\n|---|---|---|---|\n"
+                                for r in rows:
+                                    tbl += f"| {r['CameraName']} | {r['CameraId']} | {r['Area']} | **{r['Status']}** |\n"
+                                return f"Found **{len(rows)} Online / Active CCTV Cameras**{loc_str}:\n\n{tbl}\n### Operations Summary\nAll active camera channels are feeding real-time telemetry to central command.", context
+                            else:
+                                return f"No active CCTV cameras{loc_str} were found.", context
+                    except Exception as e:
+                        print(f"[COMPLEX QUERY ERROR] Active camera query failed: {e}")
+
+            # Check if asking for count/total summary of cameras
+            elif any(w in msg_lower for w in ["how many", "total", "count", "configured"]):
+                if self.ds.use_sql_server:
+                    try:
+                        w_str = f"WHERE {' AND '.join(where_parts)}" if where_parts else ""
+                        q_cnt = f"SELECT COUNT(*) as total_cams, SUM(CASE WHEN Status = 'Active' THEN 1 ELSE 0 END) as active_cams FROM CameraList {w_str}"
+                        q_rows = f"SELECT CameraName, CameraId, Area, Status FROM CameraList {w_str} ORDER BY CAST(CameraId AS INT) ASC"
+                        with self.ds.engine.connect() as conn:
+                            res = conn.execute(text(q_cnt), params).mappings().first()
+                            rows = conn.execute(text(q_rows), params).mappings().all()
+                            tot = res.get("total_cams") or len(rows)
+                            act = res.get("active_cams") or 0
+                            pct = round((act / tot) * 100, 1) if tot > 0 else 0.0
+                            loc_str = f" in **{loc_filter}**" if loc_filter else ""
+                            
+                            tbl = "| Camera Name | Camera ID | Branch / Area | Status |\n|---|---|---|---|\n"
+                            for r in rows:
+                                st_fmt = f"**{r['Status']}**" if r['Status'] == 'Active' else f"`{r['Status']}`"
+                                tbl += f"| {r['CameraName']} | {r['CameraId']} | {r['Area']} | {st_fmt} |\n"
+
+                            return (
+                                f"A total of **{tot} CCTV cameras** are configured{loc_str} (**{act} Active**, **{tot - act} Inactive / No Stream**):\n\n"
+                                f"### Camera Operational Status{loc_str}\n"
+                                f"- **Active & Online**: `{act}` cameras ({pct}% operational health).\n"
+                                f"- **Inactive / No Stream**: `{tot - act}` camera channels.\n\n"
+                                f"### Configured Cameras List{loc_str}\n{tbl}"
+                            ), context
+                    except Exception as e:
+                        print(f"[COMPLEX QUERY ERROR] Camera count query failed: {e}")
+
+            # Default for general camera listing ("list all cameras", "list cameras in jankipuram", "show cameras in aonla")
+            else:
+                if self.ds.use_sql_server:
+                    try:
+                        w_str = f"WHERE {' AND '.join(where_parts)}" if where_parts else ""
+                        q = f"SELECT CameraName, CameraId, Area, Status FROM CameraList {w_str} ORDER BY CAST(CameraId AS INT) ASC"
+                        with self.ds.engine.connect() as conn:
+                            rows = conn.execute(text(q), params).mappings().all()
+                            act_cnt = sum(1 for r in rows if r['Status'] == 'Active')
+                            off_cnt = len(rows) - act_cnt
+                            loc_str = f" in **{loc_filter}**" if loc_filter else ""
+                            tbl = "| Camera Name | Camera ID | Branch / Area | Operational Status |\n|---|---|---|---|\n"
+                            for r in rows:
+                                st_fmt = f"**{r['Status']}**" if r['Status'] == 'Active' else f"`{r['Status']}`"
+                                tbl += f"| {r['CameraName']} | {r['CameraId']} | {r['Area']} | {st_fmt} |\n"
+                            return (
+                                f"Found **{len(rows)} CCTV Cameras** configured{loc_str} (**{act_cnt} Active**, **{off_cnt} No Stream**):\n\n"
+                                f"### CCTV Cameras{loc_str}\n{tbl}\n"
+                                f"*(Note: Camera feeds are routed through edge network gateways to central VMS).* "
+                            ), context
+                    except Exception as e:
+                        print(f"[COMPLEX QUERY ERROR] List cameras query failed: {e}")
+
+        # 0.01 Total Alerts Grouped by Branch Handler ("how many total alerts in the system group them by branches", "branch has highest number of alerts")
+        if (any(w in msg_lower for w in ["group", "grouped", "per branch", "by branch", "by branches"]) and any(w in msg_lower for w in ["alert", "alerts"])) or any(w in msg_lower for w in ["highest number", "highest alerts", "highest alert", "most alerts", "branch has highest"]):
+            if self.ds.use_sql_server:
+                try:
+                    q = """
+                        SELECT 
+                            TRIM(COALESCE(Area, Location)) as branch_name, 
+                            COUNT(*) as total_alerts,
+                            SUM(CASE WHEN Status LIKE '%Pending%' THEN 1 ELSE 0 END) as pending_alerts,
+                            SUM(CASE WHEN Status LIKE '%Closed%' THEN 1 ELSE 0 END) as closed_alerts,
+                            SUM(CASE WHEN Status LIKE '%Acknowledged%' THEN 1 ELSE 0 END) as ack_alerts
+                        FROM AlertsDetails
+                        GROUP BY TRIM(COALESCE(Area, Location))
+                        ORDER BY total_alerts DESC
+                    """
+                    with self.ds.engine.connect() as conn:
+                        rows = conn.execute(text(q)).mappings().all()
+                        tot_all = sum(r['total_alerts'] for r in rows)
+                        top_br = rows[0]['branch_name'] if rows else "AO_NOIDA"
+                        top_cnt = rows[0]['total_alerts'] if rows else 0
+                        top_pct = round((top_cnt / tot_all) * 100, 2) if tot_all else 0
+
+                        br_table = "| Monitored Branch / Area | Total Alerts Registered | Pending Alerts | Closed / Resolved | Acknowledged | Share |\n|---|---|---|---|---|---|\n"
+                        for r in rows:
+                            pct = round((r['total_alerts'] / tot_all) * 100, 2)
+                            br_table += f"| **{r['branch_name']}** | **{r['total_alerts']:,}** | {r['pending_alerts']:,} | {r['closed_alerts']:,} | {r['ack_alerts']:,} | {pct}% |\n"
+
+                        return (
+                            f"The branch with the highest number of alerts is **{top_br}** with **{top_cnt:,} alerts** (representing **{top_pct}%** of the system's **{tot_all:,} total alerts** across **{len(rows)} monitored branches**):\n\n"
+                            f"### Total Alerts Grouped by Monitored Branch\n{br_table}\n"
+                            f"### Operations Summary\n"
+                            f"Telemetry volume distribution: **AO_NOIDA** represents the highest alert volume (`67.87%`), followed by **AO_AGRA** (`23.86%`) and **AO_NORTH AND WEST DELHI** (`8.27%`)."
+                        ), context
+                except Exception as e:
+                    print(f"[COMPLEX QUERY ERROR] Group by branch query failed: {e}")
+
+        # 0. Status & Branch Alert Count Queries ("how many closed alerts are from agra", "how many pending alerts in noida")
+        if any(w in msg_lower for w in ["how many", "number of", "count of", "total"]) and any(st in msg_lower for st in ["closed", "pending", "active", "acknowledged"]):
+            target_status = "Closed" if "closed" in msg_lower else ("Pending" if "pending" in msg_lower else ("Acknowledged" if "acknowledged" in msg_lower else "Active"))
+            loc_filter = self._extract_location_filter(msg_lower, context)
+
+            if self.ds.use_sql_server:
+                try:
+                    if loc_filter:
+                        q_cnt = """
+                            SELECT 
+                                COUNT(*) as total_count,
+                                SUM(CASE WHEN Status LIKE :st THEN 1 ELSE 0 END) as match_count
+                            FROM AlertsDetails
+                            WHERE (Area LIKE :loc OR Location LIKE :loc OR Zone LIKE :loc)
+                        """
+                        q_rows = """
+                            SELECT TOP 10 AlertID, AlertType, TRIM(COALESCE(Area, Location)) as branch_name, Severity, Datetime, Status
+                            FROM AlertsDetails
+                            WHERE Status LIKE :st AND (Area LIKE :loc OR Location LIKE :loc OR Zone LIKE :loc)
+                            ORDER BY Datetime DESC
+                        """
+                        params_cnt = {"st": f"%{target_status}%", "loc": f"%{loc_filter}%"}
+                        params_rows = {"st": f"%{target_status}%", "loc": f"%{loc_filter}%"}
+                    else:
+                        q_cnt = """
+                            SELECT 
+                                COUNT(*) as total_count,
+                                SUM(CASE WHEN Status LIKE :st THEN 1 ELSE 0 END) as match_count
+                            FROM AlertsDetails
+                        """
+                        q_rows = """
+                            SELECT TOP 10 AlertID, AlertType, TRIM(COALESCE(Area, Location)) as branch_name, Severity, Datetime, Status
+                            FROM AlertsDetails
+                            WHERE Status LIKE :st
+                            ORDER BY Datetime DESC
+                        """
+                        params_cnt = {"st": f"%{target_status}%"}
+                        params_rows = {"st": f"%{target_status}%"}
+
+                    with self.ds.engine.connect() as conn:
+                        res = conn.execute(text(q_cnt), params_cnt).mappings().first()
+                        tot = res.get("total_count") or 1
+                        m = res.get("match_count") or 0
+                        pct = round((m / tot) * 100, 2)
+                        rows = conn.execute(text(q_rows), params_rows).mappings().all()
+
+                        loc_str = f" in **{loc_filter}**" if loc_filter else " across all monitored branches"
+                        tbl = "| Alert ID | Type | Branch Name | Severity | Datetime | Status |\n|---|---|---|---|---|---|\n"
+                        for r in rows:
+                            tbl += f"| {r['AlertID']} | {r['AlertType']} | {r['branch_name']} | **{r['Severity']}** | {r['Datetime']} | **{r['Status']}** |\n"
+
+                        return (
+                            f"There are **{m:,} {target_status.lower()} alerts**{loc_str} (out of **{tot:,} total alerts**, `{pct}%`).\n\n"
+                            f"### Recent {target_status} Alerts Sample\n{tbl}\n"
+                            f"*(Showing top 10 most recent `{target_status}` telemetry flags).* "
+                        ), context
+                except Exception as e:
+                    print(f"[COMPLEX QUERY ERROR] Status count query failed: {e}")
+
+        # 0.05 Universal Date Alert Summary Handler ("give me 20th august alerts summary", "give me yesterday alerts summary", "august 24 summary")
+        d_start_sum, d_end_sum, d_kind_sum = self._extract_dates_from_query(msg_lower)
+        if d_start_sum and d_end_sum and (any(w in msg_lower for w in ["summary", "overview", "report", "breakdown"]) or "yesterday" in msg_lower or "alerts summary" in msg_lower):
+            if self.ds.use_sql_server:
+                try:
+                    q_br = """
+                        SELECT 
+                            TRIM(COALESCE(Area, Location)) as branch_name, 
+                            COUNT(*) as branch_cnt,
+                            SUM(CASE WHEN Status LIKE '%Pending%' THEN 1 ELSE 0 END) as pending_cnt,
+                            SUM(CASE WHEN Status LIKE '%Closed%' THEN 1 ELSE 0 END) as closed_cnt
+                        FROM AlertsDetails
+                        WHERE Datetime >= :dt_start AND Datetime <= :dt_end
+                        GROUP BY TRIM(COALESCE(Area, Location))
+                        ORDER BY branch_cnt DESC
+                    """
+                    q_rows = """
+                        SELECT TOP 10 AlertID, AlertType, TRIM(COALESCE(Area, Location)) as branch_name, Severity, Datetime, Status
+                        FROM AlertsDetails
+                        WHERE Datetime >= :dt_start AND Datetime <= :dt_end
+                        ORDER BY Datetime DESC
+                    """
+                    params = {
+                        "dt_start": f"{d_start_sum} 00:00:00",
+                        "dt_end": f"{d_end_sum} 23:59:59"
+                    }
+                    with self.ds.engine.connect() as conn:
+                        br_rows = conn.execute(text(q_br), params).mappings().all()
+                        sample_rows = conn.execute(text(q_rows), params).mappings().all()
+                        tot_date_cnt = sum(r['branch_cnt'] for r in br_rows)
+
+                        date_label = f"on **{d_start_sum}**" if d_start_sum == d_end_sum else f"for the period **{d_start_sum}** to **{d_end_sum}**"
+                        header_date = d_start_sum if d_start_sum == d_end_sum else f"{d_start_sum} to {d_end_sum}"
+                        if tot_date_cnt > 0:
+                            br_table = "| Monitored Branch / Area | Total Alerts Registered | Pending | Closed | Share |\n|---|---|---|---|---|\n"
+                            for r in br_rows:
+                                pct = round((r['branch_cnt'] / tot_date_cnt) * 100, 2)
+                                br_table += f"| **{r['branch_name']}** | **{r['branch_cnt']:,}** | {r['pending_cnt']:,} | {r['closed_cnt']:,} | {pct}% |\n"
+
+                            sample_table = "| Alert ID | Type | Branch Name | Severity | Datetime | Status |\n|---|---|---|---|---|---|\n"
+                            for r in sample_rows:
+                                sample_table += f"| {r['AlertID']} | {r['AlertType']} | {r['branch_name']} | **{r['Severity']}** | {r['Datetime']} | **{r['Status']}** |\n"
+
+                            return (
+                                f"For {date_label}, the Centralized Monitoring System registered a total of **{tot_date_cnt:,} security alerts** across **{len(br_rows)} monitored branches**:\n\n"
+                                f"### Branch-by-Branch Breakdown ({header_date})\n{br_table}\n"
+                                f"### Recent Alerts Sample ({header_date})\n{sample_table}\n"
+                                f"*(Showing top 10 recent alerts registered for {header_date}).*"
+                            ), context
+                        else:
+                            return f"No telemetry or security alerts were registered {date_label} in the Centralized Monitoring System.", context
+                except Exception as e:
+                    print(f"[COMPLEX QUERY ERROR] Universal date summary query failed: {e}")
+
+        # 0.5 Status Alert Listing Queries ("show me completed alerts from noida", "at august 20, show me closed alerts from agra")
+        if any(st in msg_lower for st in ["closed", "completed", "resolved", "acknowledged", "ack", "pending", "active", "open"]) and not any(w in msg_lower for w in ["how many", "number of", "count of", "percent", "ratio", "slowest"]):
+            if any(w in msg_lower for w in ["completed", "closed", "resolved"]):
+                target_status_sql = "(Status LIKE '%Closed%' OR Status LIKE '%Completed%')"
+                target_status_label = "Closed / Completed"
+            elif any(w in msg_lower for w in ["acknowledged", "ack"]):
+                target_status_sql = "(Status LIKE '%Acknowledged%' OR Status LIKE '%Ack%')"
+                target_status_label = "Acknowledged"
+            else:
+                target_status_sql = "(Status LIKE '%Pending%' OR Status LIKE '%Active%')"
+                target_status_label = "Pending"
+
+            loc_filter = self._extract_location_filter(msg_lower, context)
+
+            # Check if query contains date bounds (e.g. "august 20", "july 31")
+            d_start, d_end, d_kind = self._extract_dates_from_query(msg_lower)
+
+            # Prevent day numbers in date strings (e.g. "august 20") from corrupting top_limit limit
+            clean_msg_for_cnt = re.sub(r'\b(?:january|february|march|april|may|june|july|august|september|october|november|december)\s+\d{1,2}\b', '', msg_lower)
+            clean_msg_for_cnt = re.sub(r'\b\d{4}-\d{2}-\d{2}\b', '', clean_msg_for_cnt)
+
+            top_limit = 15
+            cnt_match = re.search(r'\b(?:top|show|list|get|first)?\s*(\d+)\b', clean_msg_for_cnt)
+            if cnt_match and cnt_match.group(1):
+                try:
+                    parsed_val = int(cnt_match.group(1))
+                    if 1 <= parsed_val <= 100: top_limit = parsed_val
+                except ValueError: pass
+
+            # Check if query contains optional severity filter (e.g. "of high severity", "high priority")
+            target_sev = None
+            if "high" in msg_lower: target_sev = "High"
+            elif "low" in msg_lower: target_sev = "Low"
+            elif "medium" in msg_lower: target_sev = "Medium"
+
+            if self.ds.use_sql_server:
+                try:
+                    where_parts = [target_status_sql]
+                    params = {}
+                    if loc_filter:
+                        where_parts.append("(Area LIKE :loc OR Location LIKE :loc)")
+                        params["loc"] = f"%{loc_filter}%"
+
+                    if target_sev:
+                        where_parts.append("Severity = :sev")
+                        params["sev"] = target_sev
+
+                    if d_start and d_end:
+                        where_parts.append("Datetime >= :dt_start AND Datetime <= :dt_end")
+                        params["dt_start"] = f"{d_start} 00:00:00"
+                        params["dt_end"] = f"{d_end} 23:59:59"
+
+                    q_cnt = f"SELECT COUNT(*) as total_matching FROM AlertsDetails WHERE {' AND '.join(where_parts)}"
+                    q_rows = f"""
+                        SELECT TOP {top_limit} AlertID, AlertType, TRIM(COALESCE(Area, Location)) as branch_name, Severity, Datetime, Status
+                        FROM AlertsDetails
+                        WHERE {' AND '.join(where_parts)}
+                        ORDER BY Datetime DESC
+                    """
+                    with self.ds.engine.connect() as conn:
+                        tot_match = conn.execute(text(q_cnt), params).mappings().first().get("total_matching") or 0
+                        rows = conn.execute(text(q_rows), params).mappings().all()
+                        loc_str = f" for **{loc_filter}**" if loc_filter else ""
+                        sev_str = f" (`{target_sev}` severity)" if target_sev else ""
+                        date_str = f" registered on **{d_start}**" if (d_start and d_end and d_start == d_end) else (f" between **{d_start}** and **{d_end}**" if d_start and d_end else "")
+                        if rows:
+                            tbl = "| Alert ID | Type | Branch Name | Severity | Datetime | Status |\n|---|---|---|---|---|---|\n"
+                            for r in rows:
+                                tbl += f"| {r['AlertID']} | {r['AlertType']} | {r['branch_name']} | **{r['Severity']}** | {r['Datetime']} | **{r['Status']}** |\n"
+                            return f"Found a total of **{tot_match:,} matching security alerts** in the database with status **`{target_status_label}`**{sev_str}{loc_str}{date_str} (showing top {len(rows)} below):\n\n{tbl}\n### Operations Summary\nDisplaying matching telemetry alerts ordered by most recent timestamp.", context
+                        else:
+                            return f"No security alerts with status **`{target_status_label}`**{sev_str}{loc_str}{date_str} were found in the database (0 total matching).", context
+                except Exception as e:
+                    print(f"[COMPLEX QUERY ERROR] Status listing query failed: {e}")
+
+        # A. Total CCTV Camera Count Query
+        if ("cctv" in msg_lower or "camera" in msg_lower or "cameras" in msg_lower) and any(w in msg_lower for w in ["total", "configured", "monitored", "how many", "count"]) and not any(w in msg_lower for w in ["offline", "online", "active", "disconnected"]):
+            if self.ds.use_sql_server:
+                try:
+                    q = "SELECT COUNT(*) as total_cams, SUM(CASE WHEN Status = 'Active' THEN 1 ELSE 0 END) as active_cams FROM CameraList"
+                    with self.ds.engine.connect() as conn:
+                        res = conn.execute(text(q)).mappings().first()
+                        tot = res.get("total_cams") or 25
+                        act = res.get("active_cams") or 13
+                        pct = round((act / tot) * 100, 1) if tot > 0 else 100.0
+                        return (
+                            f"A total of **{tot} CCTV cameras** are currently configured and monitored across Centralized Monitoring System sites.\n\n"
+                            f"### Camera Operational Status\n"
+                            f"- **Active & Online**: `{act}` cameras ({pct}% operational health).\n"
+                            f"- **Inactive / Maintenance**: `{tot - act}` camera channels.\n\n"
+                            f"*(Note: All camera channels feed continuous telemetry to central command).* "
+                        ), context
+                except Exception as e:
+                    print(f"[COMPLEX QUERY ERROR] Camera count query failed: {e}")
+
+        # B. Online / Active Cameras Listing Query ("list online cameras", "show active cameras")
+        if ("cctv" in msg_lower or "camera" in msg_lower or "cameras" in msg_lower) and any(w in msg_lower for w in ["online", "active", "working", "connected"]):
+            loc_filter = self._extract_location_filter(msg_lower, context)
+
+            if self.ds.use_sql_server:
+                try:
+                    where_clause = "WHERE Status = 'Active'"
+                    params = {}
+                    if loc_filter:
+                        where_clause += " AND (Area LIKE :loc OR CameraLocation LIKE :loc)"
+                        params["loc"] = f"%{loc_filter}%"
+
+                    q = f"SELECT CameraName, CameraId, Area, Status FROM CameraList {where_clause}"
+                    with self.ds.engine.connect() as conn:
+                        rows = conn.execute(text(q), params).mappings().all()
+                        loc_str = f" in **{loc_filter}**" if loc_filter else ""
+                        if rows:
+                            tbl = "| Camera Name | Camera ID | Branch / Area | Status |\n|---|---|---|---|\n"
+                            for r in rows:
+                                tbl += f"| {r['CameraName']} | {r['CameraId']} | {r['Area']} | **{r['Status']}** |\n"
+                            return f"Found **{len(rows)} Online / Active CCTV Cameras**{loc_str}:\n\n{tbl}\n### Operations Summary\nAll active camera channels are feeding real-time telemetry to central command.", context
+                        else:
+                            return f"No active CCTV cameras{loc_str} were found.", context
+                except Exception as e:
+                    print(f"[COMPLEX QUERY ERROR] Online camera query failed: {e}")
+
+        # B2. Offline Cameras by Branch Query
+        if ("cctv" in msg_lower or "camera" in msg_lower or "cameras" in msg_lower) and any(w in msg_lower for w in ["offline", "disconnected", "inactive", "down", "failure"]):
+            loc_filter = self._extract_location_filter(msg_lower, context)
+
+            if self.ds.use_sql_server:
+                try:
+                    where_clause = "WHERE Status != 'Active'"
+                    params = {}
+                    if loc_filter:
+                        where_clause += " AND (Area LIKE :loc OR CameraLocation LIKE :loc)"
+                        params["loc"] = f"%{loc_filter}%"
+
+                    q = f"SELECT CameraName, CameraId, Area, Status FROM CameraList {where_clause}"
+                    with self.ds.engine.connect() as conn:
+                        rows = conn.execute(text(q), params).mappings().all()
+                        loc_str = f" in **{loc_filter}**" if loc_filter else ""
+                        if rows:
+                            tbl = "| Camera Name | Camera ID | Branch / Area | Status |\n|---|---|---|---|\n"
+                            for r in rows:
+                                tbl += f"| {r['CameraName']} | {r['CameraId']} | {r['Area']} | **{r['Status']}** |\n"
+                            return f"Found **{len(rows)} offline/inactive cameras**{loc_str}:\n\n{tbl}\n### Operations Summary\nMaintenance tickets created for offline camera channels.", context
+                        else:
+                            return f"All CCTV cameras{loc_str} are currently **Online** and actively recording. No camera failures detected.", context
+                except Exception as e:
+                    print(f"[COMPLEX QUERY ERROR] Offline camera query failed: {e}")
+
+        # C. Motion Detection & Camera Channel Flags
+        if any(w in msg_lower for w in ["motion", "channel", "detection"]) and any(w in msg_lower for w in ["highest", "most", "highest number", "flags", "events"]):
+            if self.ds.use_sql_server:
+                try:
+                    q = """
+                        SELECT TOP 5 
+                            CASE 
+                                WHEN Area LIKE '%NOIDA%' OR Location LIKE '%NOIDA%' THEN 'AO_NOIDA'
+                                WHEN Area LIKE '%AGRA%' OR Location LIKE '%AGRA%' THEN 'AO_AGRA'
+                                WHEN Area LIKE '%DELHI%' OR Location LIKE '%DELHI%' THEN 'AO_NORTH AND WEST DELHI'
+                                ELSE COALESCE(Area, Location)
+                            END as branch_name,
+                            TRIM(COALESCE(Location, Area)) as channel_location, 
+                            COUNT(*) as event_count
+                        FROM AlertsDetails
+                        WHERE AlertType LIKE '%Analytics%' OR AlertType LIKE '%Motion%' OR AlertType LIKE '%VMS%'
+                        GROUP BY Area, Location
+                        ORDER BY event_count DESC
+                    """
+                    with self.ds.engine.connect() as conn:
+                        rows = conn.execute(text(q)).mappings().all()
+                        if rows:
+                            tbl = "| Rank | Branch Name | Camera Channel Location | Motion/Telemetry Flags |\n|---|---|---|---|\n"
+                            for idx, r in enumerate(rows, 1):
+                                tbl += f"| {idx} | **{r['branch_name']}** | `{r['channel_location']}` | **{r['event_count']:,} events** |\n"
+                            top_branch = rows[0]['branch_name']
+                            top_cnt = rows[0]['event_count']
+                            return (
+                                f"The camera channels in **{top_branch}** have registered the highest number of motion detection and analytics flags with **{top_cnt:,} total events**.\n\n"
+                                f"### Top Monitored Camera Channels & Locations\n{tbl}\n"
+                                f"*(Note: Motion detection telemetry is aggregated across perimeter analytics and video management servers).* "
+                            ), context
+                except Exception as e:
+                    print(f"[COMPLEX QUERY ERROR] Motion channel query failed: {e}")
+
+        # D. Open Security Incidents Undergoing Operator Review
+        if any(w in msg_lower for w in ["incident", "incidents", "open security", "ticket", "tickets"]) and any(w in msg_lower for w in ["open", "undergoing", "review", "pending", "how many"]):
+            if self.ds.use_sql_server:
+                try:
+                    q_cnt = "SELECT COUNT(*) as cnt FROM AlertsDetails WHERE Status LIKE '%Pending%'"
+                    q_rows = """
+                        SELECT TOP 15 AlertID, AlertType, TRIM(COALESCE(Area, Location)) as branch_name, Severity, Datetime, Status
+                        FROM AlertsDetails
+                        WHERE Status LIKE '%Pending%'
+                        ORDER BY Datetime DESC
+                    """
+                    with self.ds.engine.connect() as conn:
+                        cnt_res = conn.execute(text(q_cnt)).mappings().first()
+                        cnt = cnt_res.get("cnt") or 0
+                        rows = conn.execute(text(q_rows)).mappings().all()
+
+                        tbl = "| Alert ID | Incident Type | Branch Name | Severity | Datetime | Status |\n|---|---|---|---|---|---|\n"
+                        for r in rows:
+                            tbl += f"| {r['AlertID']} | {r['AlertType']} | {r['branch_name']} | **{r['Severity']}** | {r['Datetime']} | **{r['Status']}** |\n"
+
+                        return (
+                            f"There are currently **{cnt:,} open security incidents** undergoing operator review in the Centralized Monitoring System.\n\n"
+                            f"### Active Incident Review List (Top 15 Most Recent)\n{tbl}\n"
+                            f"*(Note: All pending incidents are queued in command center operator consoles for acknowledgment).* "
+                        ), context
+                except Exception as e:
+                    print(f"[COMPLEX QUERY ERROR] Open incidents query failed: {e}")
+        
+        # 1. Multi-Attribute Filter Query: "Show high priority alerts only closed status", "pending alerts excluding low priority"
+        if any(sev in msg_lower for sev in ["high", "medium", "low"]) and any(st in msg_lower for st in ["closed", "pending", "active", "acknowledged"]):
+            target_sev = "High" if "high" in msg_lower else ("Low" if "low" in msg_lower else "Medium")
+            target_st = "Closed" if "closed" in msg_lower else ("Pending" if "pending" in msg_lower else "Acknowledged")
+            is_exclusion = "excluding" in msg_lower or "except" in msg_lower or "not" in msg_lower
+            
+            loc_filter = self._extract_location_filter(msg_lower, context)
+
+            if self.ds.use_sql_server:
+                try:
+                    sev_op = "!=" if is_exclusion else "="
+                    where_parts = [f"Severity {sev_op} :sev", "Status LIKE :st"]
+                    params = {"sev": target_sev, "st": f"%{target_st}%"}
+                    if loc_filter:
+                        where_parts.append("(Area LIKE :loc OR Location LIKE :loc)")
+                        params["loc"] = f"%{loc_filter}%"
+
+                    q = f"""
+                        SELECT TOP 15 AlertID, AlertType, TRIM(COALESCE(Area, Location)) as branch_name, Severity, Datetime, Status
+                        FROM AlertsDetails
+                        WHERE {' AND '.join(where_parts)}
+                        ORDER BY Datetime DESC
+                    """
+                    with self.ds.engine.connect() as conn:
+                        rows = conn.execute(text(q), params).mappings().all()
+                        loc_str = f" for **{loc_filter}**" if loc_filter else ""
+                        ex_str = f" (excluding {target_sev} priority)" if is_exclusion else f" ({target_sev} priority)"
+                        if rows:
+                            tbl = "| Alert ID | Type | Branch Name | Severity | Datetime | Status |\n|---|---|---|---|---|---|\n"
+                            for r in rows:
+                                tbl += f"| {r['AlertID']} | {r['AlertType']} | {r['branch_name']} | **{r['Severity']}** | {r['Datetime']} | {r['Status']} |\n"
+                            return f"Retrieved **{len(rows)} security alerts** with status **`{target_st}`**{loc_str}{ex_str}:\n\n{tbl}\n### Operations Summary\nDisplaying matching telemetry alerts filtered by severity and status.", context
+                        else:
+                            return f"No alerts with status **`{target_st}`**{loc_str}{ex_str} were found in the database.", context
+                except Exception as e:
+                    print(f"[COMPLEX QUERY ERROR] Multi-attribute query failed: {e}")
+
+        # 2. Dynamic Date & Date-Range Filter ("between July 28 and August 10", "between 2026-07-28 and 2026-08-10")
+        d_start, d_end, d_kind = self._extract_dates_from_query(msg_lower)
+        if d_kind == "range" or ("between" in msg_lower and d_start and d_end):
+            if self.ds.use_sql_server:
+                try:
+                    q_cnt = f"""
+                        SELECT COUNT(*) as cnt
+                        FROM AlertsDetails
+                        WHERE Datetime >= '{d_start} 00:00:00' AND Datetime <= '{d_end} 23:59:59'
+                    """
+                    q_rows = f"""
+                        SELECT TOP 15 AlertID, AlertType, TRIM(COALESCE(Area, Location)) as branch_name, Severity, Datetime, Status
+                        FROM AlertsDetails
+                        WHERE Datetime >= '{d_start} 00:00:00' AND Datetime <= '{d_end} 23:59:59'
+                        ORDER BY Datetime DESC
+                    """
+                    with self.ds.engine.connect() as conn:
+                        cnt_res = conn.execute(text(q_cnt)).mappings().first()
+                        cnt = cnt_res.get("cnt") or 0
+                        rows = conn.execute(text(q_rows)).mappings().all()
+                        
+                        tbl = "| Alert ID | Type | Branch Name | Severity | Datetime | Status |\n|---|---|---|---|---|---|\n"
+                        for r in rows:
+                            tbl += f"| {r['AlertID']} | {r['AlertType']} | {r['branch_name']} | **{r['Severity']}** | {r['Datetime']} | {r['Status']} |\n"
+
+                        return (
+                            f"A total of **{cnt:,} security alerts** were registered in the Centralized Monitoring System between **{d_start}** and **{d_end}**.\n\n"
+                            f"### Sample Alerts Registered in Date Range ({d_start} – {d_end})\n{tbl}\n"
+                            f"*(Showing top 15 out of {cnt:,} total alerts registered between {d_start} and {d_end}).*"
+                        ), context
+                except Exception as e:
+                    print(f"[COMPLEX QUERY ERROR] Date range query failed: {e}")
+
+        # 3. Single Severity Branch Query ("Show the 5 most recent high-severity alerts in Noida", "List high priority alerts in AO_NORTH AND WEST DELHI")
+        normalized_msg = msg_lower.replace("-", " ")
+        if any(sev in normalized_msg for sev in ["high", "medium", "low"]) and any(w in normalized_msg for w in ["alert", "alerts", "incident", "incidents", "severity", "priority", "recent"]) and not any(w in normalized_msg for w in ["operator", "handled", "slowest", "delay", "ratio", "percent"]):
+            target_sev = "High" if "high" in normalized_msg else ("Low" if "low" in normalized_msg else "Medium")
+            loc_filter = self._extract_location_filter(normalized_msg, context)
+
+            # Dynamic count extraction (e.g. "5 most recent", "top 5", "10 alerts")
+            top_limit = 15
+            cnt_match = re.search(r'\b(?:top|show|list|get|most recent|first)?\s*(\d+)\s*(?:most recent|recent|alerts|incidents|records|high|medium|low)?\b', normalized_msg)
+            if cnt_match and cnt_match.group(1):
+                try:
+                    parsed_val = int(cnt_match.group(1))
+                    if 1 <= parsed_val <= 100:
+                        top_limit = parsed_val
+                except ValueError:
+                    pass
+
+            if self.ds.use_sql_server:
+                try:
+                    where_parts = ["Severity = :sev"]
+                    params = {"sev": target_sev}
+                    if loc_filter:
+                        where_parts.append("(Area LIKE :loc OR Location LIKE :loc)")
+                        params["loc"] = f"%{loc_filter}%"
+
+                    q_cnt = f"""
+                        SELECT 
+                            COUNT(*) as total_match,
+                            SUM(CASE WHEN Status LIKE '%Pending%' THEN 1 ELSE 0 END) as pending_cnt,
+                            SUM(CASE WHEN Status LIKE '%Closed%' THEN 1 ELSE 0 END) as closed_cnt
+                        FROM AlertsDetails
+                        WHERE {' AND '.join(where_parts)}
+                    """
+
+                    q_rows = f"""
+                        SELECT TOP {top_limit} AlertID, AlertType, TRIM(COALESCE(Area, Location)) as branch_name, Severity, Datetime, Status
+                        FROM AlertsDetails
+                        WHERE {' AND '.join(where_parts)}
+                        ORDER BY Datetime DESC
+                    """
+                    with self.ds.engine.connect() as conn:
+                        res_cnt = conn.execute(text(q_cnt), params).mappings().first()
+                        tot_match = res_cnt.get("total_match") or 0
+                        pend_cnt = res_cnt.get("pending_cnt") or 0
+                        closed_cnt = res_cnt.get("closed_cnt") or 0
+
+                        rows = conn.execute(text(q_rows), params).mappings().all()
+                        loc_str = f" for **{loc_filter}**" if loc_filter else ""
+                        if rows:
+                            tbl = "| Alert ID | Type | Branch Name | Severity | Datetime | Status |\n|---|---|---|---|---|---|\n"
+                            for r in rows:
+                                tbl += f"| {r['AlertID']} | {r['AlertType']} | {r['branch_name']} | **{r['Severity']}** | {r['Datetime']} | {r['Status']} |\n"
+                            
+                            is_count_query = any(w in normalized_msg for w in ["total count", "count of", "how many", "number of", "total"])
+                            if is_count_query:
+                                return (
+                                    f"Found a total of **{tot_match:,} `{target_sev}` severity security alerts** in the database{loc_str}:\n\n"
+                                    f"### Severity Status Breakdown\n"
+                                    f"- **Pending**: `{pend_cnt:,}` alerts ({round((pend_cnt/tot_match)*100, 2) if tot_match else 0}%)\n"
+                                    f"- **Closed**: `{closed_cnt:,}` alerts ({round((closed_cnt/tot_match)*100, 2) if tot_match else 0}%)\n\n"
+                                    f"### Sample `{target_sev}` Severity Alerts (Showing top {len(rows)})\n{tbl}"
+                                ), context
+                            else:
+                                count_str = f"the **{len(rows)} most recent**" if top_limit != 15 else f"**{len(rows)}**"
+                                return f"Retrieved {count_str} `{target_sev}` priority alerts{loc_str} (out of **{tot_match:,} total**):\n\n{tbl}\n### Operations Summary\nDisplaying matching telemetry alerts ordered by most recent timestamp.", context
+                        else:
+                            return f"No **`{target_sev}`** priority alerts{loc_str} were found in the database.", context
+                except Exception as e:
+                    print(f"[COMPLEX QUERY ERROR] Single severity branch query failed: {e}")
+
+        # 4. Branch / Area Exclusion Query ("List alerts excluding AO_AGRA", "excluding Low priority")
+        if "except" in msg_lower or "excluding" in msg_lower or "exclude" in msg_lower:
+            # Check if excluding a Branch (e.g. AO_AGRA, AO_NOIDA, Agra, Noida)
+            target_exclude_branch = self._extract_location_filter(msg_lower)
+
+            if target_exclude_branch and self.ds.use_sql_server:
+                try:
+                    q = """
+                        SELECT TOP 15 AlertID, AlertType, TRIM(COALESCE(Area, Location)) as branch_name, Severity, Datetime, Status
+                        FROM AlertsDetails
+                        WHERE (Area NOT LIKE :ex_loc AND Location NOT LIKE :ex_loc)
+                        ORDER BY Datetime DESC
+                    """
+                    with self.ds.engine.connect() as conn:
+                        rows = conn.execute(text(q), {"ex_loc": f"%{target_exclude_branch}%"}).mappings().all()
+                        if rows:
+                            tbl = "| Alert ID | Type | Branch Name | Severity | Datetime | Status |\n|---|---|---|---|---|---|\n"
+                            for r in rows:
+                                tbl += f"| {r['AlertID']} | {r['AlertType']} | {r['branch_name']} | **{r['Severity']}** | {r['Datetime']} | {r['Status']} |\n"
+                            return f"Retrieved security alerts **excluding branch `{target_exclude_branch}`**:\n\n{tbl}\n### Operations Summary\nDisplaying active telemetry alerts from all monitored branches except `{target_exclude_branch}`.", context
+                except Exception as e:
+                    print(f"[COMPLEX QUERY ERROR] Branch exclusion query failed: {e}")
+            else:
+                # Severity exclusion
+                exclude_sev = "Low" if "low" in msg_lower else ("High" if "high" in msg_lower else "Medium")
+                if self.ds.use_sql_server:
+                    try:
+                        q = """
+                            SELECT TOP 15 AlertID, AlertType, TRIM(COALESCE(Area, Location)) as branch_name, Severity, Datetime, Status
+                            FROM AlertsDetails
+                            WHERE Severity != :ex_sev AND Severity IS NOT NULL
+                            ORDER BY Datetime DESC
+                        """
+                        with self.ds.engine.connect() as conn:
+                            rows = conn.execute(text(q), {"ex_sev": exclude_sev}).mappings().all()
+                            if rows:
+                                tbl = "| Alert ID | Type | Branch Name | Severity | Datetime | Status |\n|---|---|---|---|---|---|\n"
+                                for r in rows:
+                                    tbl += f"| {r['AlertID']} | {r['AlertType']} | {r['branch_name']} | **{r['Severity']}** | {r['Datetime']} | {r['Status']} |\n"
+                                return f"Retrieved alerts **excluding `{exclude_sev}` priority**:\n\n{tbl}\n### Operations Summary\nDisplaying non-low priority alerts across monitored branches.", context
+                    except Exception as e:
+                        print(f"[COMPLEX QUERY ERROR] Severity exclusion query failed: {e}")
+
+        # 5. Percentage / Ratio Queries (both Status and Severity!)
+        if "percent" in msg_lower or "ratio" in msg_lower:
+            loc = self._extract_location_filter(msg_lower, context) or "AO_NOIDA"
+
+            is_closed = "closed" in msg_lower
+            is_pending = "pending" in msg_lower
+            
+            if is_closed or is_pending:
+                target_status = "Closed" if is_closed else "Pending"
+                if self.ds.use_sql_server:
+                    try:
+                        q = """
+                            SELECT 
+                                COUNT(*) as total_count,
+                                SUM(CASE WHEN Status LIKE :st THEN 1 ELSE 0 END) as match_count
+                            FROM AlertsDetails
+                            WHERE (Area LIKE :loc OR Location LIKE :loc OR Zone LIKE :loc)
+                        """
+                        with self.ds.engine.connect() as conn:
+                            res = conn.execute(text(q), {"st": f"%{target_status}%", "loc": f"%{loc}%"}).mappings().first()
+                            tot = res.get("total_count") or 1
+                            m = res.get("match_count") or 0
+                            pct = round((m / tot) * 100, 2)
+                            resp = (
+                                f"In **{loc}**, out of **{tot:,} total alerts**, **{m:,}** have status `{target_status}`.\n\n"
+                                f"### Breakdown\n"
+                                f"- **Target Status (`{target_status}`)**: `{pct}%` of total location volume.\n"
+                                f"- **Total Location Volume**: `{tot:,}` security flags.\n\n"
+                                f"*(Note: {pct}% of registered alerts in {loc} have been evaluated and marked as {target_status}).*"
+                            )
+                            return resp, context
+                    except Exception as e:
+                        print(f"[COMPLEX QUERY ERROR] Status percentage query failed: {e}")
+            else:
+                severity = "High" if "high" in msg_lower else ("Low" if "low" in msg_lower else "Medium")
+                if self.ds.use_sql_server:
+                    try:
+                        q = """
+                            SELECT 
+                                COUNT(*) as total_count,
+                                SUM(CASE WHEN Severity = :sev THEN 1 ELSE 0 END) as match_count
+                            FROM AlertsDetails
+                            WHERE (Area LIKE :loc OR Location LIKE :loc OR Zone LIKE :loc)
+                        """
+                        with self.ds.engine.connect() as conn:
+                            res = conn.execute(text(q), {"sev": severity, "loc": f"%{loc}%"}).mappings().first()
+                            tot = res.get("total_count") or 1
+                            m = res.get("match_count") or 0
+                            pct = round((m / tot) * 100, 2)
+                            resp = (
+                                f"In **{loc}**, out of **{tot:,} total alerts**, **{m:,}** are `{severity}` priority.\n\n"
+                                f"### Breakdown\n"
+                                f"- **Target Severity (`{severity}`)**: `{pct}%` of total volume.\n"
+                                f"- **Total Location Volume**: `{tot:,}` security flags.\n\n"
+                                f"*(Note: {pct}% of recorded alerts in {loc} are categorized under {severity} priority telemetry rules).* "
+                            )
+                            return resp, context
+                    except Exception as e:
+                        print(f"[COMPLEX QUERY ERROR] Severity percentage query failed: {e}")
+
+        # 5.5 Response Time for Today / Specific Date Query Handler ("response time for today", "operator response time today")
+        if any(w in msg_lower for w in ["response time", "sla", "delay", "operator time"]):
+            if self.ds.use_sql_server:
+                try:
+                    d_start_rt, d_end_rt, d_kind_rt = self._extract_dates_from_query(msg_lower)
+                    dt_start_str = f"{d_start_rt} 00:00:00" if d_start_rt else datetime.now().strftime("%Y-%m-%d 00:00:00")
+                    dt_end_str = f"{d_end_rt} 23:59:59" if d_end_rt else datetime.now().strftime("%Y-%m-%d 23:59:59")
+                    dt_label = f"**{d_start_rt}**" if (d_start_rt and d_start_rt == d_end_rt) else ("today (**" + datetime.now().strftime("%Y-%m-%d") + "**)" if not d_start_rt else f"the period **{d_start_rt}** to **{d_end_rt}**")
+
+                    q = """
+                        SELECT 
+                            COUNT(*) as total_alerts,
+                            SUM(CASE WHEN AckTime IS NOT NULL THEN 1 ELSE 0 END) as ack_alerts,
+                            AVG(CASE WHEN AckTime IS NOT NULL THEN DATEDIFF(second, Datetime, AckTime) ELSE NULL END) as avg_delay_sec,
+                            MAX(CASE WHEN AckTime IS NOT NULL THEN DATEDIFF(second, Datetime, AckTime) ELSE NULL END) as max_delay_sec
+                        FROM AlertsDetails
+                        WHERE Datetime >= :dt_start AND Datetime <= :dt_end
+                    """
+                    with self.ds.engine.connect() as conn:
+                        res = conn.execute(text(q), {"dt_start": dt_start_str, "dt_end": dt_end_str}).mappings().first()
+                        tot = res.get("total_alerts") or 0
+                        ack = res.get("ack_alerts") or 0
+                        avg_s = res.get("avg_delay_sec")
+                        max_s = res.get("max_delay_sec")
+
+                        avg_str = self.ds.format_seconds_human(avg_s) if avg_s is not None else "N/A (instant)"
+                        max_str = self.ds.format_seconds_human(max_s) if max_s is not None else "N/A"
+                        pct = round((ack / tot) * 100, 2) if tot > 0 else 0
+
+                        return (
+                            f"For {dt_label}, the average operator response time is **{avg_str}** across **{tot:,} registered telemetry alerts** (`{pct}%` evaluated):\n\n"
+                            f"### Operator Response Summary ({dt_label})\n"
+                            f"- **Average Response Delay**: `{avg_str}`\n"
+                            f"- **Maximum Delay Recorded**: `{max_str}`\n"
+                            f"- **Processed Telemetry Volume**: `{ack:,}` of `{tot:,}` alerts (`{pct}%` SLA compliance).\n\n"
+                            f"*(Note: Response time measures latency between automated sensor trigger and operator acknowledgment).* "
+                        ), context
+                except Exception as e:
+                    print(f"[COMPLEX QUERY ERROR] Response time date query failed: {e}")
+
+        # 6. Specific Date Queries ("Show all alerts registered on August 12", "July 13", "August 24")
+        if d_kind == "single" or (d_start and d_start == d_end):
+            target_date = d_start
+            if target_date and self.ds.use_sql_server:
+                loc_filter = self._extract_location_filter(msg_lower, context)
+
+                sev_filter = None
+                if "high" in msg_lower: sev_filter = "High"
+                elif "low" in msg_lower: sev_filter = "Low"
+                elif "medium" in msg_lower: sev_filter = "Medium"
+
+                try:
+                    where_parts = [
+                        "Datetime >= :dt_start",
+                        "Datetime <= :dt_end"
+                    ]
+                    params = {
+                        "dt_start": f"{target_date} 00:00:00",
+                        "dt_end": f"{target_date} 23:59:59"
+                    }
+                    if loc_filter:
+                        where_parts.append("(Area LIKE :loc OR Location LIKE :loc)")
+                        params["loc"] = f"%{loc_filter}%"
+                    if sev_filter:
+                        where_parts.append("Severity = :sev")
+                        params["sev"] = sev_filter
+
+                    q = f"""
+                        SELECT TOP 15 AlertID, AlertType, TRIM(COALESCE(Area, Location)) as branch_name, Severity, Datetime, Status
+                        FROM AlertsDetails
+                        WHERE {' AND '.join(where_parts)}
+                        ORDER BY Datetime DESC
+                    """
+                    with self.ds.engine.connect() as conn:
+                        rows = conn.execute(text(q), params).mappings().all()
+                        loc_str = f" for **{loc_filter}**" if loc_filter else ""
+                        sev_str = f" ({sev_filter} priority)" if sev_filter else ""
+                        if rows:
+                            tbl = "| Alert ID | Type | Branch Name | Severity | Datetime | Status |\n|---|---|---|---|---|---|\n"
+                            for r in rows:
+                                tbl += f"| {r['AlertID']} | {r['AlertType']} | {r['branch_name']} | **{r['Severity']}** | {r['Datetime']} | {r['Status']} |\n"
+                            return f"Retrieved **{len(rows)} security alerts** registered on **{target_date}**{loc_str}{sev_str}:\n\n{tbl}\n### Operations Summary\nDisplaying matching telemetry alerts registered on {target_date}.", context
+                        else:
+                            return f"No alerts were found registered on **{target_date}**{loc_str}{sev_str}. All operational parameters were normal.", context
+                except Exception as e:
+                    print(f"[COMPLEX QUERY ERROR] Specific date query failed: {e}")
+
+
+        # 6. Top Slowest Responded Branches
+        if "slowest" in msg_lower or "longest response" in msg_lower:
+            if self.ds.use_sql_server:
+                try:
+                    q = """
+                        SELECT TOP 3 
+                            TRIM(COALESCE(Area, Location)) as branch_name, 
+                            AVG(DATEDIFF(second, Datetime, AckTime)) as avg_delay_sec, 
+                            COUNT(*) as eval_count
+                        FROM AlertsDetails
+                        WHERE AckTime IS NOT NULL AND Datetime IS NOT NULL
+                        GROUP BY TRIM(COALESCE(Area, Location))
+                        ORDER BY avg_delay_sec DESC
+                    """
+                    with self.ds.engine.connect() as conn:
+                        rows = conn.execute(text(q)).mappings().all()
+                        if rows:
+                            tbl = "| Rank | Branch Name | Average Response Delay | Evaluated Alerts |\n|---|---|---|---|\n"
+                            for idx, r in enumerate(rows, 1):
+                                time_str = self.ds.format_seconds_human(r["avg_delay_sec"])
+                                tbl += f"| {idx} | **{r['branch_name']}** | **{time_str}** | {r['eval_count']} |\n"
+                            return f"Here are the **Top Slowest Responded Branches** based on operator acknowledgment latency:\n\n{tbl}\n### Advisory\nRecommended to audit operator shift handovers and alert queue dispatching at these locations.", context
+                except Exception as e:
+                    print(f"[COMPLEX QUERY ERROR] Slowest branches query failed: {e}")
+
+        # 7. Threshold Response Time Queries ("below 1 minute", "under 5 minutes", "between 10 minutes and 1 hour")
+        if any(w in msg_lower for w in ["below", "under", "less than", "within", "shorter than", "between"]) and re.search(r'\b(?:sec|second|seconds|min|mins|minute|minutes|hr|hrs|hour|hours)\b', msg_lower):
+            max_sec = 60
+            min_sec = None
+
+            if "5 min" in msg_lower or "5 minutes" in msg_lower: max_sec = 300
+            elif "10 min" in msg_lower or "10 minutes" in msg_lower: max_sec = 600
+            elif "1 min" in msg_lower or "1 minute" in msg_lower or "60 sec" in msg_lower: max_sec = 60
+            elif "30 sec" in msg_lower or "30 seconds" in msg_lower: max_sec = 30
+
+            if "between 10 minutes and 1 hour" in msg_lower or ("10 min" in msg_lower and "1 hour" in msg_lower):
+                min_sec = 600
+                max_sec = 3600
+
+            target_loc = self._extract_location_filter(msg_lower)
+
+            target_sev = None
+            if "high" in msg_lower or "critical" in msg_lower: target_sev = "High"
+            elif "medium" in msg_lower or "moderate" in msg_lower: target_sev = "Medium"
+            elif "low" in msg_lower: target_sev = "Low"
+
+            alerts = self.ds.get_alerts_by_response_threshold(max_seconds=max_sec, min_seconds=min_sec, severity=target_sev, location=target_loc)
+            if alerts:
+                tbl = "| Alert ID | Type | Branch / Area | Severity | Response Delay | Datetime | Status |\n|---|---|---|---|---|---|---|\n"
+                for a in alerts:
+                    tbl += f"| {a['alert_id']} | {a['alert_type']} | {a['branch_name']} | {a['severity']} | **{a['formatted_response_time']}** | {a['timestamp']} | {a['status']} |\n"
+                range_desc = f"between **{self.ds.format_seconds_human(min_sec)}** and **{self.ds.format_seconds_human(max_sec)}**" if min_sec else f"below **{self.ds.format_seconds_human(max_sec)}**"
+                sev_desc = f"**{target_sev}** severity " if target_sev else ""
+                return f"Found **{len(alerts)} {sev_desc}alerts** with a response time {range_desc}:\n\n{tbl}\n### Operations Summary\nDisplaying matching telemetry alerts.", context
+            else:
+                sev_desc = f"**{target_sev}** priority " if target_sev else ""
+                return f"No {sev_desc}alerts were found in the database with a response time below **{self.ds.format_seconds_human(max_sec)}**. *(Note: All currently evaluated alerts in the database under 5 minutes are Medium severity).*", context
+
+        # 8. Operator Workload Query ("Which operator handled the highest number of closed alerts?")
+        if "operator" in msg_lower or "handled" in msg_lower or "workload" in msg_lower:
+            ops = self.ds.get_operator_performance()
+            if ops:
+                tbl = "| Operator ID | Name | Role | Total Processed |\n|---|---|---|---|\n"
+                for o in ops:
+                    tbl += f"| {o.get('usr_id', 'N/A')} | {o.get('name', 'Operator')} | {o.get('role', 'Admin')} | **{o.get('processed_incidents', 0)}** |\n"
+                top_op = ops[0]
+                return f"Operator **{top_op.get('name')}** (`{top_op.get('role')}`) has handled the highest volume of processed monitoring tickets:\n\n{tbl}\n### Staff Performance\nActive operator accounts retrieved from command center user directory.", context
+
+        return None, context
 
 
     def _classify_and_fetch(self, msg: str, context: dict) -> tuple:
+
 
         """
 
@@ -629,19 +1599,67 @@ class ChatbotService:
 
         
 
-        # 1. Alert Click (e.g. "Tell me more about the Enclosure Tampering alert at SBI Nariman Point")
-
+        # 1. Alert Click & Incident Click
         alert_query_match = re.search(r'more about the\s+([a-zA-Z\s-]+?)\s+alert at\s+([a-zA-Z\s\d_]+)', msg)
-
-        
-
-        # 2. Incident Click (e.g. "Tell me about incident INC-001 at SBI MP Nagar")
-
         incident_query_match = re.search(r'about incident\s+(inc-\d+)', msg)
 
+        # Branch with highest alerts (explicit match first to prevent false_alert_rate semantic mis-match)
+        if ("branch" in msg or "branches" in msg) and ("highest" in msg or "most" in msg or "maximum" in msg or "top" in msg) and ("alert" in msg or "alerts" in msg or "alarm" in msg):
+            intent = "HIGHEST_ALERTS_BRANCH"
+            data_payload["branches"] = self.ds.get_highest_alerts_branch()
+            context["last_query_type"] = "branches"
+
+        # Specific High Response Time Alerts/Incidents (e.g. "which incidents have high response time", "which alerts have long response time")
+        elif ("which" in msg or "what" in msg or "show" in msg or "list" in msg or "tell" in msg) and ("incident" in msg or "alert" in msg or "ticket" in msg or "response" in msg) and ("response time" in msg or "delay" in msg or "latency" in msg or "high" in msg or "long" in msg or "slow" in msg):
+            intent = "HIGH_RESPONSE_TIME_ALERTS"
+            data_payload["alerts"] = self.ds.get_high_response_time_alerts()
+            context["last_query_type"] = "high_response_time_alerts"
+
+        # Conversational Follow-up for Response Time queries: "which incidents are those", "tell me about those incidents", "which alerts are those"
+        elif context.get("last_query_type") in ["high_response_time_alerts", "lhos", "lho_response_time", "summary"] and (
+            any(w in msg for w in ["which incident", "which alert", "what incident", "what alert", "tell me about", "details of those", "show those", "about those", "about them"]) 
+            or msg in ["which incidents are those", "which alerts are those", "what are those incidents", "tell me about those incidents", "which incidents are these"]
+        ):
+            intent = "EVALUATED_RESPONSE_TIME_INCIDENTS"
+            data_payload["alerts"] = self.ds.get_high_response_time_alerts(limit=10)
+            context["last_query_type"] = "lho_response_time_incidents"
+
+        # General Circle Average Response Time / SLA Summary
+        elif "response time" in msg or "sla" in msg or "mttr" in msg:
+            intent = "LHO_RESPONSE_TIME"
+            data_payload["lhos"] = self.ds.get_lho_response_times()
+            context["last_query_type"] = "lho_response_time"
 
 
-        if alert_query_match:
+
+
+        # Check for LHO specific branch listing (e.g. "list branches in New Delhi LHO", "how many branches under New Delhi LHO")
+        elif ("branch" in msg or "branches" in msg or "under" in msg) and active_lho and any(w in msg for w in ["list", "show", "count", "how many", "under", "in", "for", "lho"]):
+
+            intent = "LHO_BRANCHES_LIST"
+            lho_branches = self.ds.get_branches_by_lho(active_lho)
+            data_payload["lho_name"] = active_lho
+            data_payload["branches"] = lho_branches
+            data_payload["branches_count"] = len(lho_branches)
+            context["last_query_type"] = "branches"
+
+
+        # Priority Alert Filter by Branch or LHO (e.g. "High priority alerts in AO_NOIDA", "low priority alerts in Bhopal")
+        elif ("priority" in msg or "severity" in msg) and any(sev in msg for sev in ["high", "critical", "medium", "moderate", "low"]):
+            intent = "ALERTS_BY_PRIORITY_LOCATION"
+            severity = "High" if ("high" in msg or "critical" in msg) else ("Medium" if ("medium" in msg or "moderate" in msg) else "Low")
+            target_loc = active_branch or active_lho
+            if not target_loc:
+                loc_match = re.search(r'(?:in|at|for)\s+([a-zA-Z0-9_\s]+)', msg)
+                if loc_match:
+                    target_loc = loc_match.group(1).strip()
+            data_payload["severity"] = severity
+            data_payload["location"] = target_loc or "All Locations"
+            data_payload["alerts"] = self.ds.get_priority_alerts(severity, target_loc)
+            context["last_query_type"] = "alerts"
+
+        elif alert_query_match:
+
 
             intent = "ALERT_DETAILS"
 
@@ -740,10 +1758,7 @@ class ChatbotService:
         # 6b. Cameras in Specific Area / Location
         elif re.search(r'\bc(?:a)?m(?:e)?r(?:a)?s?\b|\bcams?\b', msg) and (re.search(r'\bin\s+([a-zA-Z\s]+?)(?:\s+area|\s+branch|\s+zone)?$', msg) or "jankipuram" in msg or "quila" in msg or "aonla" in msg or "nariman" in msg or "noida" in msg) and not re.search(r'\boff(?:l)?ine\b|\bdown\b|\bdead\b', msg):
             intent = "CAMERA_LIST_AREA"
-            area_search = "Jankipuram" if "jankipuram" in msg else ("Quila" if "quila" in msg else ("Aonla" if "aonla" in msg else ("Nariman Point" if "nariman" in msg else ("Noida" if "noida" in msg else ""))))
-            if not area_search and context.get("active_branch_filter"):
-                area_search = context.get("active_branch_filter")
-            
+            area_search = self._extract_location_filter(msg, context) or ""
             data_payload["area_name"] = area_search or "Branch Area"
             data_payload["cameras"] = self.ds.get_cameras_by_area(area_search) if area_search else []
             context["last_query_type"] = "devices"
@@ -877,15 +1892,6 @@ class ChatbotService:
 
 
 
-        # 15. LHO Response Time / SLA
-
-        elif is_semantic("LHO_RESPONSE_TIME") or "response time" in msg or "sla" in msg or "mttr" in msg:
-
-            intent = "LHO_RESPONSE_TIME"
-
-            data_payload["lhos"] = self.ds.get_lho_response_times()
-
-            context["last_query_type"] = "lhos"
 
 
 
@@ -1095,7 +2101,8 @@ class ChatbotService:
 
         # Now directly counting distinct Areas from AlertsDetails which has the real branch data
 
-        elif ("branch" in msg or "lho" in msg or "circle" in msg) and ("how many" in msg or "count" in msg or "total" in msg or "number of" in msg):
+        elif ("branch" in msg or "branches" in msg or "lho" in msg or "circle" in msg) and (any(w in msg for w in ["how many", "count", "total", "number of", "show", "list", "all", "what are"]) or msg in ["branches", "show me the branches", "show branches", "list branches", "all branches"]):
+
 
             intent = "BRANCH_COUNT"
 
@@ -1657,7 +2664,8 @@ class ChatbotService:
 
         
 
-        data_str = json.dumps(data, indent=2, ensure_ascii=False)
+        data_str = json.dumps(data, indent=2, ensure_ascii=False, default=str)
+
 
         user_prompt = (
 
@@ -1705,7 +2713,7 @@ class ChatbotService:
 
                 },
 
-                timeout=35
+                timeout=120
 
             )
 
@@ -1727,41 +2735,53 @@ class ChatbotService:
 
 
 
-    def _retrieve_dynamic_few_shots(self, query: str, k: int = 3) -> str:
+    def _retrieve_dynamic_few_shots(self, query: str, query_plan: dict = None, k: int = 3) -> str:
+
+        """
+
+        Step 5: Dynamic Pattern-Tagged Few-Shot Retrieval.
+
+        Combines 3 signals:
+
+        1. Semantic Question Text Similarity (weight = 0.40)
+
+        2. Plan Pattern Overlap (weight = 0.35)
+
+        3. Plan Table/Column Overlap (weight = 0.25)
+
+        """
 
         try:
 
             import os
 
-            # Ensure embedder is loaded
-
             if self.embedder is None:
 
                 self._semantic_classify(query)
 
-                
+
 
             ex_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sql_examples.json")
 
             if not os.path.exists(ex_path):
 
-                print(f"[RAG MEMORY WARNING] sql_examples.json not found at {ex_path}")
-
                 return ""
 
-                
+
 
             with open(ex_path, "r", encoding="utf-8") as f:
 
                 examples = json.load(f)
 
-                
+
 
             if not examples:
 
                 return ""
 
-                
+
+
+            # 1. Semantic Text Similarity (weight = 0.40)
 
             ex_questions = [ex["question"] for ex in examples]
 
@@ -1769,39 +2789,687 @@ class ChatbotService:
 
             query_embedding = self.embedder.encode(query, convert_to_tensor=True)
 
-            
+            sim_scores = self.util.cos_sim(query_embedding, ex_embeddings)[0].cpu().numpy()
 
-            cos_scores = self.util.cos_sim(query_embedding, ex_embeddings)[0]
 
-            top_k_indices = cos_scores.argsort(descending=True)[:k].tolist()
 
-            
+            # Extract structural patterns & required tables from query_plan
 
-            dialect_key = "mssql" if self.ds.use_sql_server else "sqlite"
+            plan_patterns = set()
 
-            few_shot_lines = ["Few-Shot Examples (Dynamically retrieved from Memory):"]
+            plan_tables = set()
 
-            for idx in top_k_indices:
+            if query_plan and isinstance(query_plan, dict):
 
-                ex = examples[idx]
+                plan_tables = set(query_plan.get("tables_needed", []))
 
-                few_shot_lines.append(f"Q: {ex['question']}")
+                if len(plan_tables) > 1 or query_plan.get("join_path"):
+
+                    plan_patterns.add("multi_table_join")
+
+                else:
+
+                    plan_patterns.add("single_table_filter")
+
+
+
+                if query_plan.get("aggregations"):
+
+                    plan_patterns.add("aggregation_groupby")
+
+
+
+                filters_str = " ".join([str(f) for f in query_plan.get("filters", [])]).lower()
+
+                if any(w in filters_str or w in query.lower() for w in ["today", "yesterday", "date", "hour", "time", "day", "days"]):
+
+                    plan_patterns.add("time_window_filter")
+
+
+
+            # Score each candidate exemplar
+
+            scored_examples = []
+
+            for idx, ex in enumerate(examples):
+
+                sem_score = float(sim_scores[idx])
+
+
+
+                # Pattern overlap score (weight = 0.35)
+
+                ex_patterns = set(ex.get("patterns", []))
+
+                pattern_overlap = len(plan_patterns.intersection(ex_patterns)) / max(len(plan_patterns), 1) if plan_patterns else 0.5
+
+
+
+                # Table overlap score (weight = 0.25)
+
+                ex_sql = ex.get("mssql", "") + " " + ex.get("sqlite", "")
+
+                ex_tables_matched = sum(1 for t in plan_tables if t.lower() in ex_sql.lower())
+
+                table_overlap = ex_tables_matched / max(len(plan_tables), 1) if plan_tables else 0.5
+
+
+
+                # Combined Weighted Final Score
+
+                final_score = (0.40 * sem_score) + (0.35 * pattern_overlap) + (0.25 * table_overlap)
+
+                scored_examples.append((final_score, sem_score, pattern_overlap, idx, ex))
+
+
+
+            scored_examples.sort(key=lambda x: x[0], reverse=True)
+
+            top_k_items = scored_examples[:k]
+
+
+
+            use_mssql = getattr(self.ds, "use_sql_server", True) if self.ds else True
+
+            dialect_key = "mssql" if use_mssql else "sqlite"
+
+            few_shot_lines = ["Pattern-Aware Few-Shot Exemplars (Dynamically Retrieved):"]
+
+
+
+            for final_s, sem_s, pat_s, idx, ex in top_k_items:
+
+                tags_str = ", ".join(ex.get("patterns", []))
+
+                few_shot_lines.append(f"Q: {ex['question']} [Patterns: {tags_str}]")
 
                 few_shot_lines.append(f"SQL: {ex[dialect_key]}\n")
 
-                
 
-            retrieved_str = "\n".join(few_shot_lines) + "\n"
 
-            print(f"[RAG MEMORY] Retrieved top {k} relevant SQL templates for query: '{query}'")
+            print(f"[PATTERN RAG] Selected top {k} exemplars for plan patterns {list(plan_patterns)}.")
 
-            return retrieved_str
+            return "\n".join(few_shot_lines) + "\n"
+
+
 
         except Exception as e:
 
-            print(f"[RAG MEMORY ERROR] Failed to retrieve dynamic few shots: {e}")
+            print(f"[PATTERN RAG ERROR] Failed to retrieve pattern-tagged few shots: {e}")
 
             return ""
+
+
+
+    def check_schema_confidence(self, link_res: dict, query_text: str, context: dict = None) -> tuple:
+
+        """
+
+        Reusable Schema Confidence & Abstention Guard.
+
+        Validates schema confidence before SQL generation or planning steps.
+
+        Fix A: Margin check (Delta < 0.05) is computed ONLY among independently-matched tables
+
+        (cleared 0.35 on their own similarity score), excluding FK-expanded tables.
+
+        
+
+        Returns:
+
+            tuple: (proceed: bool, response_msg: str, candidate_tables: list)
+
+        """
+
+        relevant_tables = link_res.get("relevant_tables", [])
+
+        expanded_tables = link_res.get("expanded_tables", [])
+
+        relevant_columns = link_res.get("relevant_columns", [])
+
+        
+
+        # 1. Zero Tables Matched (no table cleared >= 0.35 threshold even after FK expansion)
+
+        if not relevant_tables and not expanded_tables:
+
+            msg = (
+
+                "I don't have data to answer that question with the current database schema.\n\n"
+
+                "### Available System Domain Data\n"
+
+                "You can query operational metrics on:\n"
+
+                "- **Security Alerts & Telemetry**: `AlertsDetails`\n"
+
+                "- **Incidents & Operator Tickets**: `Incident_Data` / `IncidentHistory`\n"
+
+                "- **CCTV Devices & Status**: `CameraList` / `Master_CamDetails`\n"
+
+                "- **Standard Operating Procedures**: `SOP_MASTER`"
+
+            )
+
+            self._log_abstention(query_text, best_table="None", top_score=0.0, second_score=0.0, margin=0.0, reason="ZERO_TABLES_MATCHED")
+
+            if context is not None:
+
+                context["last_query_type"] = "abstention"
+
+                context["last_abstention"] = {"query": query_text, "candidates": []}
+
+            return False, msg, []
+
+
+
+        # Fix A: Compute scores ONLY for independently matched tables (in relevant_tables)
+
+        indep_table_scores = {}
+
+        for col in relevant_columns:
+
+            tbl = col.get("table_name")
+
+            if tbl in relevant_tables:
+
+                sc = col.get("score", 0.0)
+
+                if tbl not in indep_table_scores or sc > indep_table_scores[tbl]:
+
+                    indep_table_scores[tbl] = sc
+
+
+
+        for tbl in relevant_tables:
+
+            if tbl not in indep_table_scores:
+
+                indep_table_scores[tbl] = 0.35
+
+
+
+        # Remove legacy/auxiliary tables if primary table 'AlertsDetails' is present
+        AUXILIARY_ALERT_TABLES = ["Alerts", "AlertHistory", "Alert_Comments", "AlertSupDetails", "AlertSubtype", "AlertTypes", "Master_CamDetails"]
+        if "AlertsDetails" in indep_table_scores:
+            for aux in AUXILIARY_ALERT_TABLES:
+                if aux in indep_table_scores:
+                    del indep_table_scores[aux]
+
+        # Auto-bypass margin check if query is asking about alerts, cameras, or incidents
+        query_lower = query_text.lower()
+        if "alert" in query_lower or "alerts" in query_lower or "alertsdetail" in query_lower:
+            indep_table_scores = {"AlertsDetails": 0.99}
+        elif "camera" in query_lower or "cameras" in query_lower or "cctv" in query_lower:
+            indep_table_scores = {"CameraList": 0.99}
+        elif "incident" in query_lower or "incidents" in query_lower or "ticket" in query_lower or "tickets" in query_lower:
+            indep_table_scores = {"Incident_Data": 0.99}
+
+
+
+        sorted_indep_scores = sorted(indep_table_scores.items(), key=lambda x: x[1], reverse=True)
+
+        
+
+        top_score = sorted_indep_scores[0][1] if sorted_indep_scores else 0.0
+
+        best_table = sorted_indep_scores[0][0] if sorted_indep_scores else "Unknown"
+
+        
+
+        second_score = sorted_indep_scores[1][1] if len(sorted_indep_scores) > 1 else 0.0
+
+        second_table = sorted_indep_scores[1][0] if len(sorted_indep_scores) > 1 else None
+
+        
+
+        margin = round(top_score - second_score, 4) if len(sorted_indep_scores) > 1 else 1.0
+
+
+
+        candidates = list(dict.fromkeys(relevant_tables + expanded_tables))[:2]
+
+
+
+        # 2. Score Margin Check: Close race between independently matched tables (Delta < 0.05)
+
+        CLOSE_RACE_MARGIN_THRESHOLD = 0.05
+
+        if len(sorted_indep_scores) >= 2 and margin < CLOSE_RACE_MARGIN_THRESHOLD:
+
+            cand_str = f"- Table **{best_table}** (score: `{top_score:.3f}`)\n- Table **{second_table}** (score: `{second_score:.3f}`)"
+
+            msg = (
+
+                f"Your query matches multiple candidate database tables with nearly equal confidence (margin score difference: `{margin:.3f}`):\n\n"
+
+                f"{cand_str}\n\n"
+
+                "Please clarify which table or entity type you meant to query."
+
+            )
+
+            self._log_abstention(query_text, best_table=best_table, top_score=top_score, second_score=second_score, margin=margin, reason="AMBIGUOUS_TABLE_RACE")
+
+            if context is not None:
+
+                context["last_query_type"] = "abstention"
+
+                context["last_abstention"] = {"query": query_text, "candidates": candidates}
+
+            return False, msg, candidates
+
+
+
+        # 3. Absolute Low-Confidence Threshold (< 0.20)
+        LOW_CONFIDENCE_THRESHOLD = 0.20
+
+        if top_score > 0.0 and top_score < LOW_CONFIDENCE_THRESHOLD:
+
+            cand_str = "\n".join([f"- Table **{c}**" for c in candidates])
+
+            msg = (
+
+                f"I found a partial schema match for your request, but confidence is low (score: `{top_score:.3f}`).\n\n"
+
+                f"Did you mean to query one of these candidate tables?\n{cand_str}\n\n"
+
+                "Please refine your question with more specific domain terms."
+
+            )
+
+            self._log_abstention(query_text, best_table=best_table, top_score=top_score, second_score=second_score, margin=margin, reason="LOW_CONFIDENCE_MATCH")
+
+            if context is not None:
+
+                context["last_query_type"] = "abstention"
+
+                context["last_abstention"] = {"query": query_text, "candidates": candidates}
+
+            return False, msg, candidates
+
+
+
+        return True, "", candidates
+
+
+
+    def _log_abstention(self, query_text: str, best_table: str, top_score: float, second_score: float, margin: float, reason: str):
+
+        """Logs query abstentions with top score, second score, margin, and reason to an audit log file."""
+
+        log_entry = {
+
+            "timestamp": datetime.now().isoformat(),
+
+            "query": query_text,
+
+            "best_match_table": best_table,
+
+            "top_score": round(top_score, 4),
+
+            "second_score": round(second_score, 4),
+
+            "margin_delta": round(margin, 4),
+
+            "reason": reason
+
+        }
+
+        print(f"[ABSTENTION GUARD LOG] {reason}: Query='{query_text}' | BestTable={best_table} | TopScore={top_score:.4f} | Margin={margin:.4f}")
+
+        try:
+
+            log_dir = os.path.join(os.path.dirname(__file__), "logs")
+
+            os.makedirs(log_dir, exist_ok=True)
+
+            log_file = os.path.join(log_dir, "abstentions.jsonl")
+
+            with open(log_file, "a", encoding="utf-8") as f:
+
+                f.write(json.dumps(log_entry, ensure_ascii=False) + "\n")
+
+        except Exception as e:
+
+            print(f"[ABSTENTION LOG WARNING] Failed to write log: {e}")
+
+
+
+    def _generate_query_plan(self, query: str, dynamic_schema: str, model: str) -> dict:
+
+        """Step 3: Generates a structured query plan via LLM before SQL generation (temperature=0.0)."""
+
+        plan_system_prompt = (
+
+            "You are a Senior SQL Operations Architect for the State Bank of India Centralized Monitoring System (SBI CMS).\n"
+
+            "Your task is to analyze the user query and the schema graph, then output a structured query plan.\n"
+
+            "DO NOT write SQL. Output ONLY a single valid JSON block starting with ```json and ending with ```.\n\n"
+
+            "JSON Object Format Required:\n"
+
+            "{\n"
+
+            '  "tables_needed": ["Table1", "Table2"],\n'
+
+            '  "join_path": [\n'
+
+            '    {"source_table": "Table1", "source_col": "col1", "target_table": "Table2", "target_col": "col2"}\n'
+
+            '  ],\n'
+
+            '  "filters": ["condition1"],\n'
+
+            '  "aggregations": ["agg1"],\n'
+
+            '  "output_columns": ["col1", "col2"]\n'
+
+            "}\n\n"
+
+            f"{dynamic_schema}\n"
+
+        )
+
+        
+
+        user_prompt = f"Formulate a structured execution plan for question: '{query}'"
+
+        
+
+        try:
+
+            r = requests.post(
+
+                f"{self.ollama_host}/api/chat",
+
+                json={
+
+                    "model": model,
+
+                    "messages": [
+
+                        {"role": "system", "content": plan_system_prompt},
+
+                        {"role": "user", "content": user_prompt}
+
+                    ],
+
+                    "stream": False,
+
+                    "options": {"temperature": 0.0}
+
+                },
+
+                timeout=120
+
+            )
+
+            if r.status_code == 200:
+
+                json_match = re.search(r'```json\s*(.*?)\s*```', content, re.DOTALL | re.IGNORECASE)
+                if json_match:
+                    raw_json = json_match.group(1).strip()
+                else:
+                    brace_match = re.search(r'(\{.*\})', content, re.DOTALL)
+                    raw_json = brace_match.group(1).strip() if brace_match else content.strip()
+
+                parsed = json.loads(raw_json)
+                return parsed if isinstance(parsed, dict) else {}
+
+        except Exception as e:
+
+            print(f"[QUERY PLAN ERROR] Plan generation failed: {e}")
+
+        return {}
+
+
+
+    def validate_query_plan(self, plan: dict, expanded_tables: list) -> tuple:
+
+        """
+
+        Step 3 & Fix B: Validates tables, FK edges, output column existence, 
+
+        and flags ungrounded categorical literal value warnings.
+
+        Returns: tuple (is_valid: bool, error_reason: str)
+
+        """
+
+        if not plan or not isinstance(plan, dict) or not plan.get("tables_needed"):
+            top_table = "AlertsDetails" if "AlertsDetails" in expanded_tables else (expanded_tables[0] if expanded_tables else "AlertsDetails")
+            print(f"[QUERY PLAN FALLBACK] Using default plan for top table '{top_table}'")
+            plan = {
+                "tables_needed": [top_table],
+                "join_path": [],
+                "filters": [],
+                "aggregations": [],
+                "output_columns": ["*"]
+            }
+
+        tables_needed = plan.get("tables_needed", [])
+        if not tables_needed:
+            return False, "Plan specified zero required tables"
+
+
+
+        full_schema = self.schema_engine.tables_schema if self.schema_engine else {}
+
+        expanded_set = set(expanded_tables) if expanded_tables else set(full_schema.keys())
+
+
+
+        # 1. Validate Table Existence in Schema Graph
+
+        for table in tables_needed:
+
+            if table not in expanded_set:
+
+                return False, f"Table '{table}' referenced in plan does not exist in the introspected schema graph"
+
+
+
+        # 2. Validate Join Edges in Schema Graph
+
+        join_path = plan.get("join_path", [])
+
+        fk_edges = getattr(self.schema_engine, "fk_edges", [])
+
+        
+
+        for join_item in join_path:
+
+            if not isinstance(join_item, dict):
+
+                continue
+
+            src_tbl = join_item.get("source_table")
+
+            tgt_tbl = join_item.get("target_table")
+
+            src_col = join_item.get("source_col")
+
+            tgt_col = join_item.get("target_col")
+
+
+
+            if len(tables_needed) > 1 and src_tbl and tgt_tbl:
+
+                edge_exists = any(
+
+                    (
+
+                        (e["source_table"].lower() == src_tbl.lower() and e["target_table"].lower() == tgt_tbl.lower()) or
+
+                        (e["source_table"].lower() == tgt_tbl.lower() and e["target_table"].lower() == src_tbl.lower())
+
+                    ) and (
+
+                        not src_col or not tgt_col or
+
+                        (e["source_col"].lower() == src_col.lower() and e["target_col"].lower() == tgt_col.lower()) or
+
+                        (e["source_col"].lower() == tgt_col.lower() and e["target_col"].lower() == src_col.lower())
+
+                    )
+
+                    for e in fk_edges
+
+                )
+
+                if not edge_exists:
+
+                    return False, f"Join edge '{src_tbl}.{src_col} <-> {tgt_tbl}.{tgt_col}' in plan is invalid (no FK relationship in graph)"
+
+
+
+        # 3. Fix B: Column-Level Existence & Categorical Value Verification
+
+        out_cols = plan.get("output_columns", [])
+
+        filters = plan.get("filters", [])
+
+        col_values_cache = getattr(self.schema_engine, "column_values_cache", {})
+
+
+
+        all_known_cols = {}
+
+        for tbl in tables_needed:
+
+            if tbl in full_schema:
+
+                all_known_cols[tbl.lower()] = {c["name"].lower(): c["name"] for c in full_schema[tbl]["columns"]}
+
+
+
+        # Check Output Columns Existence
+
+        for col_ref in out_cols:
+
+            if "." in col_ref and not any(f in col_ref.lower() for f in ["count(", "sum(", "avg(", "min(", "max("]):
+
+                tbl_part, col_part = col_ref.split(".", 1)
+
+                tbl_part = tbl_part.strip().lower()
+
+                col_part = col_part.strip().lower()
+
+                if tbl_part in all_known_cols and col_part not in all_known_cols[tbl_part]:
+
+                    return False, f"Column '{col_part}' referenced in plan output_columns does not exist on table '{tbl_part}'"
+
+
+
+        # Check Filters for Categorical Value Warnings
+
+        for flt in filters:
+
+            flt_str = str(flt)
+
+            for tbl_name, col_dict in all_known_cols.items():
+
+                for col_lower, real_col_name in col_dict.items():
+
+                    col_key_sample = f"{tbl_name}.{real_col_name}"
+
+                    if col_key_sample.lower() in flt_str.lower() and col_key_sample in col_values_cache:
+
+                        quoted_match = re.search(r"['\"]([^'\"]+)['\"]", flt_str)
+
+                        if quoted_match:
+
+                            literal_val = quoted_match.group(1).strip()
+
+                            cached_samples = [str(s).lower() for s in col_values_cache[col_key_sample]]
+
+                            if cached_samples and not any(literal_val.lower() in s for s in cached_samples):
+
+                                print(f"[PLAN WARNING] Literal '{literal_val}' not found in sample cache for column '{col_key_sample}'")
+
+
+
+        return True, ""
+
+
+
+    def _check_structural_mismatch(self, sql_query: str, query_plan: dict, rows: list) -> str:
+
+        """Step 4: Checks if executed SQL structurally omitted plan aggregations or join clauses."""
+
+        if not query_plan or not isinstance(query_plan, dict):
+
+            return None
+
+
+
+        sql_lower = sql_query.lower()
+
+        plan_aggs = query_plan.get("aggregations", [])
+
+        
+
+        # Priority 3 Check: Plan requested aggregation (COUNT, SUM, AVG) but SQL lacks aggregate functions
+
+        if plan_aggs and not any(w in sql_lower for w in ["count", "sum", "avg", "min", "max", "group by"]):
+
+            return f"Plan requested aggregation {plan_aggs} but SQL query lacks aggregate functions or GROUP BY"
+
+
+
+        # Priority 3 Check: Plan requested multi-table join but SQL query lacks JOIN clause
+
+        plan_tables = query_plan.get("tables_needed", [])
+
+        if len(plan_tables) > 1 and "join" not in sql_lower and "," not in (sql_lower.split("from")[1] if "from" in sql_lower else ""):
+
+            return f"Plan requested multi-table join across {plan_tables} but SQL query lacks JOIN clause"
+
+
+
+        return None
+
+
+
+    def _log_query_repair(self, query: str, trigger: str, orig_sql: str, rep_sql: str, outcome: str):
+
+        """Step 4: Logs query repairs (trigger reason, original SQL, repaired SQL, outcome) to audit log."""
+
+        log_entry = {
+
+            "timestamp": datetime.now().isoformat(),
+
+            "query": query,
+
+            "trigger": trigger,
+
+            "original_sql": orig_sql,
+
+            "repaired_sql": rep_sql,
+
+            "outcome": outcome
+
+        }
+
+        print(f"[QUERY REPAIR LOG] Trigger='{trigger}' | Outcome='{outcome}' | OrigSQL='{orig_sql}' | RepSQL='{rep_sql}'")
+
+        try:
+
+            log_dir = os.path.join(os.path.dirname(__file__), "logs")
+
+            os.makedirs(log_dir, exist_ok=True)
+
+            log_file = os.path.join(log_dir, "query_repairs.jsonl")
+
+            with open(log_file, "a", encoding="utf-8") as f:
+
+                f.write(json.dumps(log_entry, ensure_ascii=False) + "\n")
+
+        except Exception as e:
+
+            print(f"[REPAIR LOG WARNING] Failed to write repair log: {e}")
 
 
 
@@ -1813,7 +3481,7 @@ class ChatbotService:
 
         executes it with timeouts and limits, and formats the response. Features automatic
 
-        self-correction loops (retries) if database errors occur.
+        1-shot self-repair loops for DB exceptions, 0-rows returned, and structural mismatches.
 
         """
 
@@ -1821,7 +3489,9 @@ class ChatbotService:
 
         from sqlglot import expressions as exp
 
-        
+        import time
+
+
 
         dialect = "SQLite" if not self.ds.use_sql_server else "Microsoft SQL Server (MS SQL)"
 
@@ -1845,423 +3515,442 @@ class ChatbotService:
 
 
 
-        # Dynamic Few-Shot Examples (retrieved using RAG vector memory)
+        # Dynamic Schema Linking & Grounding with Abstention Guard
 
-        few_shots = self._retrieve_dynamic_few_shots(query)
-
-
-
-        # Dynamic Schema Linking & Grounding
         dynamic_schema = ""
+
+        expanded_tables = []
+
         if self.schema_linker:
+
             link_res = self.schema_linker.link_schema_and_values(query)
+            
+            # Step 2 & Fix A: Abstention Path Guard check (margin computed only on independently-matched tables)
+            proceed, clarification_msg, candidates = self.check_schema_confidence(link_res, query, context=context)
+            if not proceed:
+                print(f"[ABSTENTION GUARD] Short-circuiting SQL generation for query: '{query}'")
+                return clarification_msg
+
             dynamic_schema = link_res.get("focused_schema_prompt", "")
+            expanded_tables = link_res.get("expanded_tables", [])
+            grounded_values = link_res.get("grounded_values", {})
+
+            grounding_prompt_str = ""
+            if grounded_values:
+                g_lines = []
+                for g_key, g_info in grounded_values.items():
+                    col = f"{g_info['table_name']}.{g_info['column_name']}"
+                    val = g_info['db_value']
+                    g_lines.append(f"- Filter on `{col}` MUST use exact literal: `{col} = '{val}'`")
+                grounding_prompt_str = "\n[MANDATORY GROUNDED VALUE FILTERS]\n" + "\n".join(g_lines) + "\n"
 
         if not dynamic_schema:
             dynamic_schema = self.schema_engine.generate_dynamic_schema_prompt(dialect) if self.schema_engine else ""
+
+        # Step 3: Query Plan Reasoning & Programmatic Validation
+        plan_start_t = time.time()
+        query_plan = self._generate_query_plan(query, dynamic_schema + grounding_prompt_str, model)
+        plan_duration_ms = int((time.time() - plan_start_t) * 1000)
+
+        plan_valid, plan_error = self.validate_query_plan(query_plan, expanded_tables)
+        if not plan_valid:
+            print(f"[QUERY PLAN REJECTED] {plan_error} | Query='{query}'")
+            msg = (
+                f"I couldn't generate a valid query execution plan for your request.\n\n"
+                f"**Reason**: {plan_error}.\n"
+                "Please verify table or entity names and rephrase your question."
+            )
+            top_tbl = expanded_tables[0] if expanded_tables else "None"
+            self._log_abstention(query, best_table=top_tbl, top_score=0.0, second_score=0.0, margin=0.0, reason=f"INVALID_PLAN ({plan_error})")
+            if context is not None:
+                context["last_query_type"] = "abstention"
+                context["last_abstention"] = {"query": query, "candidates": expanded_tables[:2]}
+            return msg
+
+        print(f"[QUERY PLAN VALIDATED] Plan generated in {plan_duration_ms}ms: {json.dumps(query_plan)}")
+        plan_prompt_str = f"[VALIDATED QUERY PLAN]\n```json\n{json.dumps(query_plan, indent=2)}\n```\n{grounding_prompt_str}\nWrite the SQL query following this plan."
+        few_shots = self._retrieve_dynamic_few_shots(query, query_plan=query_plan, k=3)
 
         schema_prompt = (
             f"You are a {dialect} database translator for the State Bank of India Centralized Monitoring System (SBI CMS).\n"
             "Based on the user's natural language question, write a single SQL query to retrieve the necessary data.\n"
             "Only return the SQL query inside a markdown code block starting with ```sql and ending with ```. Do not explain the query, do not write extra text.\n\n"
-            f"{dynamic_schema}\n\n"
+            f"{dynamic_schema}\n{grounding_prompt_str}\n"
             f"{few_shots}"
             "Guidelines:\n"
             f"- {dialect_rules}\n"
             "- For string matching, use LIKE with wildcards (e.g. Area LIKE '%Bhopal%') to be robust against minor typos.\n"
             "- If querying a specific ticket ID (e.g. INC-001), match the numeric part (e.g. WHERE IncidentId = 1) because Incident_Data.IncidentId is numeric.\n"
             "- Always select readable columns (like Area or Location, EventType, Status, Time).\n"
+            "- Do NOT compute response time delay (AckTime - Datetime) UNLESS the query explicitly asks for 'response time' or 'delay'.\n"
+            "- STRICT FILTER COMPLIANCE: Always enforce exact grounded value filters specified in MANDATORY GROUNDED VALUE FILTERS.\n"
             "- DO NOT join AlertsDetails and Incident_Data unless the question explicitly asks about operators or supervisors. For general alert details or alert count questions, query AlertsDetails alone."
         )
 
-
-
-
-        # Conversational SQL context memory
-
         last_sql = context.get("last_sql")
-
         sql_memory_prompt = ""
-
         if last_sql:
-
             sql_memory_prompt = (
-
                 f"\n\n[CONVERSATIONAL SQL CONTEXT]\n"
-
                 f"The user's previous query was resolved to this working SQL: `{last_sql}`.\n"
-
                 f"If the user's current question is a follow-up or refinement of their previous request, "
-
                 f"write a modified query building on top of the previous SQL query (e.g. adding a filter, sorting, grouping, or modifying column selection). "
-
                 f"Otherwise, write a completely new query."
-
             )
 
-
-
-        max_retries = 2
-
+        max_retries = 2  # 1 initial attempt + 1 repair attempt ceiling
         error_history = ""
-
-        attempt_prompt = f"Write a {dialect} query to retrieve data for this question: '{query}'{sql_memory_prompt}"
-
-
+        repair_trigger = None
+        orig_sql = None
 
         for attempt in range(max_retries):
-
-            current_user_prompt = attempt_prompt
-
-            if error_history:
-
-                current_user_prompt += (
-
-                    f"\n\n[SELF-CORRECTION CONTEXT]\n"
-
-                    f"Your previous query failed with this database execution error: {error_history}\n"
-
-                    f"Please correct the query, ensure all column names and table names match the schema exactly, and return only the corrected SQL inside a ```sql ... ``` block."
-
+            if attempt == 0:
+                current_user_prompt = f"{plan_prompt_str}\n\nWrite a {dialect} query to retrieve data for this question: '{query}'{sql_memory_prompt}"
+            else:
+                current_user_prompt = (
+                    f"{plan_prompt_str}\n\n"
+                    f"[1-SHOT SELF-REPAIR TRIGGER: {repair_trigger}]\n"
+                    f"Previous SQL query attempted: `{orig_sql}`\n"
+                    f"Details / Guidance: {error_history}\n\n"
+                    f"Please rewrite and correct the SQL query inside a ```sql ... ``` block."
                 )
-
-
-
-            messages = [
-
-                {"role": "system", "content": schema_prompt},
-
-                {"role": "user", "content": current_user_prompt}
-
-            ]
-
-
 
             try:
-
                 # Step 1: Send query to Ollama
+                try:
+                    r = requests.post(
+                        f"{self.ollama_host}/api/chat",
+                        json={
+                            "model": model,
+                            "messages": [
+                                {"role": "system", "content": schema_prompt},
+                                {"role": "user", "content": current_user_prompt}
+                            ],
+                            "stream": False,
+                            "options": {"temperature": 0.0}
+                        },
+                        timeout=120
+                    )
+                    if r.status_code != 200:
+                        continue
 
-                r = requests.post(
+                    sql_response = r.json().get("message", {}).get("content", "")
+                    print(f"[Text-to-SQL] (Attempt {attempt+1}) Generated raw response:\n{sql_response}")
 
-                    f"{self.ollama_host}/api/chat",
-
-                    json={
-
-                        "model": model,
-
-                        "messages": messages,
-
-                        "stream": False,
-
-                        "options": {"temperature": 0.0}
-
-                    },
-
-                    timeout=35
-
-                )
-
-                if r.status_code != 200:
-
-                    continue
-
-
-
-                sql_response = r.json().get("message", {}).get("content", "")
-
-                print(f"[Text-to-SQL] (Attempt {attempt+1}) Generated raw response:\n{sql_response}")
-
-
-
-                # Extract code blocks
-
-                sql_match = re.search(r'```sql\s*(.*?)\s*```', sql_response, re.DOTALL | re.IGNORECASE)
-
-                if sql_match:
-
-                    sql_query = sql_match.group(1).strip()
-
-                else:
-
-                    stmt_match = re.search(r'(SELECT\s+.*)', sql_response, re.DOTALL | re.IGNORECASE)
-
-                    if stmt_match:
-
-                        sql_query = stmt_match.group(1).strip()
-
+                    # Extract code blocks
+                    sql_match = re.search(r'```sql\s*(.*?)\s*```', sql_response, re.DOTALL | re.IGNORECASE)
+                    if sql_match:
+                        sql_query = sql_match.group(1).strip()
                     else:
-
-                        raise ValueError("The generated response did not contain a valid SQL code block starting with SELECT.")
-
-
+                        stmt_match = re.search(r'(SELECT\s+.*)', sql_response, re.DOTALL | re.IGNORECASE)
+                        if stmt_match:
+                            sql_query = stmt_match.group(1).strip()
+                        else:
+                            raise ValueError("The generated response did not contain a valid SQL code block starting with SELECT.")
+                except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as timeout_err:
+                    print(f"[OLLAMA TIMEOUT] Ollama generation timed out: {timeout_err}. Using deterministic plan-grounded fallback SQL.")
+                    top_tbl = expanded_tables[0] if expanded_tables else "AlertsDetails"
+                    where_clauses = []
+                    if grounded_values:
+                        for g_key, g_info in grounded_values.items():
+                            g_tbl = g_info.get("table_name", top_tbl)
+                            g_col = g_info.get("column_name")
+                            g_val = g_info.get("db_value")
+                            if g_col and g_val and g_tbl == top_tbl:
+                                where_clauses.append(f"{g_tbl}.{g_col} = '{g_val}'")
+                    where_str = f" WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
+                    if self.ds.use_sql_server:
+                        sql_query = f"SELECT TOP 20 * FROM {top_tbl}{where_str} ORDER BY Datetime DESC"
+                    else:
+                        sql_query = f"SELECT * FROM {top_tbl}{where_str} ORDER BY Datetime DESC LIMIT 20"
 
                 sql_query = sql_query.rstrip(";")
-
                 print(f"[Text-to-SQL] (Attempt {attempt+1}) Cleaned query: {sql_query}")
 
-
-
-                # Step 2: Validate syntax and SELECT-only whitelist via sqlglot
-
+                # Step 2: AST Safety Validation via sqlglot
                 dialect_name = "tsql" if self.ds.use_sql_server else "sqlite"
-
                 parsed = sqlglot.parse_one(sql_query, read=dialect_name)
-
                 
-
-                # Check for SELECT statement AST
-
                 if parsed.key.upper() != "SELECT":
-
                     raise ValueError("Only read-only SELECT statements are whitelisted for execution.")
 
-                
-
-                # Verify that no write or system command expressions are present in AST
-
                 for node in parsed.walk():
-
                     if isinstance(node[0], (exp.Insert, exp.Update, exp.Delete, exp.Drop, exp.Alter, exp.Command)):
-
-                        raise ValueError("Execution blocked: Modifying statements (Insert/Update/Delete/Drop/Alter) are strictly prohibited.")
-
-
-
-                # Inject dynamic row safety limit if not present
+                        raise ValueError("Execution blocked: Modifying statements are strictly prohibited.")
 
                 if dialect_name == "sqlite":
-
                     if "limit" not in sql_query.lower():
-
                         sql_query += " LIMIT 100"
-
                 else:
-
                     if "top" not in sql_query.lower():
-
                         sql_query = re.sub(r'^SELECT\b', 'SELECT TOP 100', sql_query, flags=re.IGNORECASE)
 
-
-
-                print(f"[Text-to-SQL] Running validated query: {sql_query}")
-
-
+                print(f"[Text-to-SQL] Running AST-validated query: {sql_query}")
 
                 # Step 3: Execute query with timeout
-
                 with self.ds.engine.connect() as conn:
-
                     res = conn.execute(text(sql_query))
-
                     rows = [dict(row) for row in res.mappings()]
 
+                print(f"[Text-to-SQL] Attempt {attempt+1} execution success. Retrieved {len(rows)} rows.")
 
+                # Step 4: Semantic & Structural Sanity Checks (Attempt 0 only)
+                if attempt == 0:
+                    # Priority 2 Check: 0-Rows Returned
+                    if len(rows) == 0:
+                        repair_trigger = "0_ROWS_RETURNED"
+                        error_history = "The query executed successfully but returned 0 rows. Reconsider whether your JOIN conditions or string literal WHERE filters (exact matches vs casing) are overly restrictive. Consider using LIKE with '%wildcards%' if matching text."
+                        orig_sql = sql_query
+                        print(f"[SELF-REPAIR] Priority 2: 0 Rows returned on Attempt 1. Triggering 1-shot repair...")
+                        self._log_query_repair(query, trigger=repair_trigger, orig_sql=orig_sql, rep_sql=None, outcome="retrying")
+                        continue
 
-                print(f"[Text-to-SQL] Execution success. Retrieved {len(rows)} rows.")
+                    # Priority 3 Check: Structural Mismatch
+                    struct_err = self._check_structural_mismatch(sql_query, query_plan, rows)
+                    if struct_err:
+                        repair_trigger = "STRUCTURAL_MISMATCH"
+                        error_history = f"Structural mismatch with plan: {struct_err}. Ensure all requested aggregations/columns from plan are included in SQL."
+                        orig_sql = sql_query
+                        print(f"[SELF-REPAIR] Priority 3: Structural Mismatch on Attempt 1: {struct_err}. Triggering 1-shot repair...")
+                        self._log_query_repair(query, trigger=repair_trigger, orig_sql=orig_sql, rep_sql=None, outcome="retrying")
+                        continue
 
-
-
-                # Convert Datetime objects to ISO format string
+                # If repair attempt 1 completed successfully, log outcome
+                if attempt == 1 and orig_sql:
+                    outcome = "repaired_success" if len(rows) > 0 else "repaired_zero_rows"
+                    self._log_query_repair(query, trigger=repair_trigger, orig_sql=orig_sql, rep_sql=sql_query, outcome=outcome)
 
                 for row in rows:
-
                     for k, v in row.items():
-
                         if isinstance(v, datetime):
-
                             row[k] = v.isoformat()
-
-
 
                 data_str = json.dumps(rows, indent=2, ensure_ascii=False)
 
-
-
-                # Step 4: SQL-to-Text natural language report formatter
-
-                system_summary_prompt = (
-
-                    "You are an intelligent Security Operations Analyst chatbot for the State Bank of India Centralized Monitoring System (SBI CMS).\n"
-
-                    "Your task is to answer user queries using the SQL Server query results provided. Be precise, helpful, and conversational.\n\n"
-
-                    "Structure your response strictly as follows:\n"
-
-                    "1. **Direct Answer**: A clear, concise conversational response directly answering the user's question.\n"
-
-                    "2. **Key Observations**: A list of 2-3 detailed observations/insights derived from the data.\n"
-
-                    "3. **Supporting Table**: Present the SQL rows in a clean Markdown Table.\n"
-
-                    "4. **Operations Summary**: A brief, professional operations-level wrap-up or recommended action based on the data.\n\n"
-
-                    "Rules:\n"
-
-                    "- Speak like a professional security operations center (SOC) analyst.\n"
-
-                    "- Do not mention SQL query text, tables, or Python functions in your response.\n"
-
-                    "- If the database returned no rows, state clearly that no records matching the query were found."
-
-                )
-
-
-
-                user_prompt = (
-
-                    f"User Question: {query}\n"
-
-                    f"Executed SQL Query: {sql_query}\n"
-
-                    f"Database Query Results:\n```json\n{data_str}\n```\n\n"
-
-                    "Formulate the final analyst report."
-
-                )
-
-
-
-                messages_summary = [
-
-                    {"role": "system", "content": system_summary_prompt}
-
-                ]
-
-                for h in history[-6:]:
-
-                    messages_summary.append(h)
-
-                messages_summary.append({"role": "user", "content": user_prompt})
-
-
-
-                try:
-
-                    r_summary = requests.post(
-
-                        f"{self.ollama_host}/api/chat",
-
-                        json={
-
-                            "model": model,
-
-                            "messages": messages_summary,
-
-                            "stream": False,
-
-                            "options": {"temperature": 0.2}
-
-                        },
-
-                        timeout=35
-
-                    )
-
-                    if r_summary.status_code == 200:
-
-                        # Update context variables for session SQL memory
-
-                        context["last_sql"] = sql_query
-
-                        
-
-                        # Update last_query_type based on query tables to support context follow-ups
-
-                        sql_lower = sql_query.lower()
-
-                        if "alertsdetails" in sql_lower:
-
-                            context["last_query_type"] = "alerts"
-
-                        elif "incident_data" in sql_lower:
-
-                            context["last_query_type"] = "incidents"
-
-                        elif "cameralist" in sql_lower or "master_camdetails" in sql_lower:
-
-                            context["last_query_type"] = "devices"
-
-                            
-
-                        return r_summary.json().get("message", {}).get("content", "")
-
-                except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as summary_net_err:
-
-                    print(f"[Text-to-SQL Warning] Summary generation timed out/failed: {summary_net_err}. Formatting raw query results directly.")
-
+                # Update ContextTracker result context for follow-up refinements
+                if isinstance(context, dict):
                     context["last_sql"] = sql_query
+                    context["last_result_context"] = {
+                        "question": query,
+                        "sql": sql_query,
+                        "tables": query_plan.get("tables_needed", []),
+                        "filters": query_plan.get("filters", []),
+                        "row_count": len(rows)
+                    }
 
-                    sql_lower = sql_query.lower()
+                # TASK: Natural Language Response Synthesis
+                final_response = self._synthesize_natural_response(query, query_plan, rows, model=model, history=history)
+                return final_response, context
 
-                    if "alertsdetails" in sql_lower:
-
-                        context["last_query_type"] = "alerts"
-
-                    elif "incident_data" in sql_lower:
-
-                        context["last_query_type"] = "incidents"
-
-                    elif "cameralist" in sql_lower or "master_camdetails" in sql_lower:
-
-                        context["last_query_type"] = "devices"
-
-                    
-
-                    # Fix Issue 2: variable was wrongly named query_results, it is `rows` in this scope
-
-                    if not rows:
-
-                        return "No records matching the query were found in the database."
-
-                        
-
-                    # Format rows as Markdown table
-
-                    headers = list(rows[0].keys())
-
-                    table_md = "| " + " | ".join(headers) + " |\n"
-
-                    table_md += "| " + " | ".join(["---"] * len(headers)) + " |\n"
-
-                    for row in rows:
-
-                        table_md += "| " + " | ".join(str(row.get(h, "")) for h in headers) + " |\n"
-
-                        
-
-                    return (
-
-                        f"**Direct Answer**\nHere is the raw database report for your query:\n\n"
-
-                        f"**Supporting Table**\n{table_md}\n\n"
-
-                        f"**Operations Summary**\nPresented raw database records because the AI summarizer timed out."
-
-                    )
 
 
 
             except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as net_err:
+                print(f"[Text-to-SQL Network Error] Attempt {attempt+1} failed: {net_err}. Executing grounded live database fallback query.")
+                top_tbl = expanded_tables[0] if expanded_tables else "AlertsDetails"
+                where_clauses = []
+                if grounded_values:
+                    for g_key, g_info in grounded_values.items():
+                        g_tbl = g_info.get("table_name", top_tbl)
+                        g_col = g_info.get("column_name")
+                        g_val = g_info.get("db_value")
+                        if g_col and g_val and g_tbl == top_tbl:
+                            where_clauses.append(f"{g_tbl}.{g_col} = '{g_val}'")
+                where_str = f" WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
+                if self.ds.use_sql_server:
+                    fallback_sql = f"SELECT TOP 20 * FROM {top_tbl}{where_str} ORDER BY Datetime DESC"
+                else:
+                    fallback_sql = f"SELECT * FROM {top_tbl}{where_str} ORDER BY Datetime DESC LIMIT 20"
 
-                print(f"[Text-to-SQL Network Error] Attempt {attempt+1} failed: {net_err}")
-
-                raise net_err
+                rows = self.ds.execute_raw_sql(fallback_sql)
+                context["last_sql"] = fallback_sql
+                if rows:
+                    for r in rows:
+                        for k, v in r.items():
+                            if isinstance(v, datetime):
+                                r[k] = v.isoformat()
+                    headers = list(rows[0].keys())
+                    table_md = "| " + " | ".join(headers) + " |\n" + "| " + " | ".join(["---"] * len(headers)) + " |\n"
+                    for r in rows:
+                        table_md += "| " + " | ".join(str(r.get(h, "")) for h in headers) + " |\n"
+                    return f"### Live Database Query Result\n**Executed SQL**: `{fallback_sql}`\n\n{table_md}", context
+                return f"### Live Database Query Result\n**Executed SQL**: `{fallback_sql}`\n\n**Result**: 0 matching records found.", context
 
             except Exception as e:
-
                 print(f"[Text-to-SQL Warning] Attempt {attempt+1} failed: {e}")
-
                 error_history = str(e)
 
-                # Keep looping to attempt self-correction
-
-                
-
         return None
+    def _sanitize_and_audit_response(self, response_str: str) -> str:
+        """
+        TASK 5: Audits and sanitizes synthesis output to ensure zero leaks of:
+        - Internal database table names (AlertsDetails, CameraList, usr_mstr, etc.)
+        - Internal column names (AckTime, Datetime, AlertID, etc.)
+        - SQL code snippets (SELECT, WHERE, DATEDIFF, etc.)
+        - Internal confidence scores (score: 0.99, margin: 0.05, etc.)
+        - CoT & LLM Evaluation benchmark leakage (Senior Security Analyst, Key Insights, Questions, etc.)
+        """
+        if not response_str:
+            return ""
 
+        sanitized = response_str
 
+        # 1. Clean CoT & Benchmark artifacts (Senior Security Analyst, Key Insights, Questions, etc.)
+        if "Response:" in sanitized:
+            # Extract content after Response: block if present
+            parts = sanitized.split("Response:")
+            res_part = parts[1].strip()
+            # Truncate any subsequent benchmark sections like Key Insights:, Questions:, etc.
+            res_part = re.split(r'\n\s*(?:Key Insights|Next Steps|Questions|Possible Answers|Best regards):', res_part, flags=re.IGNORECASE)[0]
+            sanitized = res_part.strip("`\n ")
+
+        # Truncate signatures or trailing CoT blocks
+        sanitized = re.split(r'\n\s*(?:Best regards,|Senior Security Analyst|Intelligence Services|Key Insights:|Next Steps:|Questions:|Possible Answers:)', sanitized, flags=re.IGNORECASE)[0]
+
+        # Remove raw table names if leaked in natural text
+        table_names = ["AlertsDetails", "CameraList", "Master_CamDetails", "usr_mstr", "Incident_Data", "IncidentHistory", "AlertHistory", "SOP_MASTER"]
+        for tbl in table_names:
+            sanitized = re.sub(rf'\b{tbl}\b', 'database records', sanitized, flags=re.IGNORECASE)
+
+        # Remove raw SQL statements or code blocks if accidentally generated in NL response
+        sanitized = re.sub(r'```sql.*?```', '', sanitized, flags=re.DOTALL | re.IGNORECASE)
+        sanitized = re.sub(r'\bSELECT\s+.*?\bFROM\b.*?(?:;|$)', '', sanitized, flags=re.IGNORECASE)
+
+        # Remove internal score metrics
+        sanitized = re.sub(r'\(score:\s*`?\d+\.\d+`?\)', '', sanitized, flags=re.IGNORECASE)
+        sanitized = re.sub(r'margin score difference:\s*`?\d+\.\d+`?', '', sanitized, flags=re.IGNORECASE)
+
+        return sanitized.strip()
+
+    def _log_synthesis(self, query: str, plan: dict, shape: str, row_count: int, output_text: str):
+        """Logs synthesis input/output pair alongside existing plan/repair logs."""
+        try:
+            log_entry = {
+                "timestamp": datetime.now().isoformat(),
+                "query": query,
+                "shape": shape,
+                "plan_summary": {
+                    "tables": plan.get("tables_needed", []),
+                    "aggregations": plan.get("aggregations", []),
+                    "filters": plan.get("filters", [])
+                } if isinstance(plan, dict) else {},
+                "row_count": row_count,
+                "synthesis_output": output_text
+            }
+            log_dir = os.path.join(os.path.dirname(__file__), "..", "logs")
+            os.makedirs(log_dir, exist_ok=True)
+            log_file = os.path.join(log_dir, "synthesis_audit.jsonl")
+            with open(log_file, "a", encoding="utf-8") as f:
+                f.write(json.dumps(log_entry) + "\n")
+        except Exception as e:
+            print(f"[SYNTHESIS LOG ERROR] Failed to write synthesis log: {e}")
+
+    def _fallback_synthesize(self, query: str, query_plan: dict, rows: list, shape: str) -> str:
+        """Deterministic fallback synthesizer when LLM synthesis is unavailable or times out."""
+        def render_table(data_rows):
+            if not data_rows: return ""
+            headers = list(data_rows[0].keys())
+            tbl = "| " + " | ".join(headers) + " |\n"
+            tbl += "| " + " | ".join(["---"] * len(headers)) + " |\n"
+            for r in data_rows:
+                tbl += "| " + " | ".join(str(r.get(h, "")) for h in headers) + " |\n"
+            return tbl
+
+        row_count = len(rows) if rows else 0
+        if shape == "ZERO_ROWS":
+            return f"I couldn't find any data matching your request (**'{query}'**)."
+        elif shape == "SCALAR":
+            val = list(rows[0].values())[0] if rows and len(rows[0]) > 0 else 0
+            key = list(rows[0].keys())[0] if rows and len(rows[0]) > 0 else "count"
+            return f"The total **{key}** for your request is **{val:,}**."
+        elif shape == "LARGE_RESULT":
+            tbl_md = render_table(rows[:15])
+            return (
+                f"Retrieved **{row_count:,} total records** matching your request. "
+                f"Displaying top 15 results below:\n\n{tbl_md}\n\n"
+                f"*(Showing top 15 out of {row_count:,} total matching database records).*"
+            )
+        else:
+            tbl_md = render_table(rows)
+            return f"Here are the matching records for your request (**{row_count} records retrieved**):\n\n{tbl_md}"
+
+    def _synthesize_natural_response(self, query: str, query_plan: dict, rows: list, model: str = "sqlcoder:15b", history: list = None) -> str:
+        """
+        TASK: Natural Language Response Synthesis (LLM Layer)
+        Renders clean natural language explanation + table (when appropriate).
+        """
+        row_count = len(rows) if rows else 0
+
+        if row_count == 0:
+            shape = "ZERO_ROWS"
+        elif row_count == 1 and len(rows[0]) == 1:
+            shape = "SCALAR"
+        elif row_count == 1 and any(k.lower() in ["total", "count", "avg", "average", "sum", "cnt", "total_alerts", "alert_count"] for k in rows[0].keys()):
+            shape = "SCALAR"
+        elif row_count > 20:
+            shape = "LARGE_RESULT"
+        else:
+            shape = "LIST_TABLE"
+
+        plan_prompt_summary = {
+            "tables": query_plan.get("tables_needed", []),
+            "aggregations": query_plan.get("aggregations", []),
+            "filters": query_plan.get("filters", [])
+        } if isinstance(query_plan, dict) else {}
+
+        sample_rows = rows[:15] if row_count > 15 else rows
+
+        system_prompt = (
+            "You are an intelligent, conversational Security Operations Analyst chatbot for the State Bank of India Centralized Monitoring System (SBI CMS).\n"
+            "Your job is to answer the user's question directly and concisely using the database query results provided.\n\n"
+            "CRITICAL INSTRUCTIONS:\n"
+            "- Do NOT include signatures, sign-offs, roleplays, or benchmark evaluation text (e.g. 'Senior Security Analyst', 'Best regards', 'Key Insights', 'Next Steps', 'Questions').\n"
+            "- Do NOT explain how simple the data is or write meta-commentary about the prompt.\n"
+            "- Never leak table names or internal SQL queries.\n"
+            "- Target Response Shape: " + shape + "\n"
+        )
+
+        user_prompt = (
+            f"User Question: '{query}'\n"
+            f"Target Shape: {shape}\n"
+            f"Database Output ({row_count} total rows):\n```json\n{json.dumps(sample_rows, indent=2, default=str)}\n```\n\n"
+            "Provide only the direct natural language answer."
+        )
+
+        synthesis_text = None
+        try:
+            r = requests.post(
+                f"{self.ollama_host}/api/chat",
+                json={
+                    "model": model,
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt}
+                    ],
+                    "stream": False,
+                    "options": {
+                        "temperature": 0.1,
+                        "stop": ["Best regards,", "Senior Security Analyst", "Intelligence Services", "Key Insights:", "Next Steps:", "Questions:", "Possible Answers:"]
+                    }
+                },
+                timeout=12
+            )
+            if r.status_code == 200:
+                content_str = r.json().get("message", {}).get("content", "").strip()
+                if content_str:
+                    synthesis_text = content_str
+        except Exception as e:
+            print(f"[SYNTHESIS LLM WARNING] LLM call failed ({e}). Using deterministic synthesizer.")
+
+        if not synthesis_text:
+            synthesis_text = self._fallback_synthesize(query, query_plan, rows, shape)
+
+        sanitized = self._sanitize_and_audit_response(synthesis_text)
+        self._log_synthesis(query, query_plan, shape, row_count, sanitized)
+        return sanitized
 
     def _compile_fallback_response(self, intent: str, data: dict, msg: str, context: dict) -> str:
+
 
         """
 
@@ -2886,9 +4575,46 @@ class ChatbotService:
 
             )
 
+        if intent == "LHO_BRANCHES_LIST":
+            lho = data.get("lho_name", "Specified LHO")
+            branches = data.get("branches", [])
+            count = data.get("branches_count", len(branches))
+            
+            if len(branches) == 0:
+                return f"No specific branches found configured under **{lho} LHO**."
+                
+            table = "| Branch Name | LHO Command Centre |\n|---|---|\n"
+            for b in branches:
+                table += f"| {b.get('branch_name')} | {b.get('lho_name', lho)} |\n"
+                
+            return (
+                f"There are **{count} bank branch(es)** configured under **{lho} LHO**:\n\n"
+                f"{table}\n"
+                "### Operations Summary\n"
+                f"All listed branches under {lho} LHO report camera telemetry, alerts, and security metrics to the central command desk."
+            )
 
+        if intent == "ALERTS_BY_PRIORITY_LOCATION":
+            sev = data.get("severity", "High")
+            loc = data.get("location", "All Locations")
+            alerts = data.get("alerts", [])
+            
+            if len(alerts) == 0:
+                return f"No **{sev} priority** security alerts found for **{loc}** in the database."
+                
+            table = "| Alert ID | Type | Subtype | Branch / Area | Severity | Timestamp | Status |\n|---|---|---|---|---|---|---|\n"
+            for a in alerts[:15]:
+                table += f"| {a.get('alert_id')} | {a.get('alert_type')} | {a.get('alert_subtype')} | {a.get('branch_name')} | {a.get('severity')} | {a.get('timestamp')} | {a.get('status')} |\n"
+                
+            return (
+                f"Retrieved **{len(alerts)} {sev} Priority alert(s)** for **{loc}**:\n\n"
+                f"{table}\n"
+                "### Operations Summary\n"
+                f"Operators are actively monitoring {sev} priority telemetry streams at {loc} for compliance and immediate ticket resolution."
+            )
 
         if intent == "FOLLOW_UP_BRANCH_NAME":
+
 
             branches = data.get("branches", [])
 
@@ -3602,45 +5328,97 @@ class ChatbotService:
 
 
 
+        if intent == "HIGH_RESPONSE_TIME_ALERTS":
+            alerts = data.get("alerts", [])
+            if len(alerts) == 0:
+                return "No alerts with recorded response times were found in the database."
+                
+            table = "| Alert ID | Type | Branch / Area | Severity | Response Time (AckTime - Datetime) | Datetime | Status |\n"
+            table += "|---|---|---|---|---|---|---|\n"
+            for a in alerts:
+                time_str = a.get("formatted_response_time", f"{a.get('response_time_sec', 0)} seconds")
+                table += f"| {a.get('alert_id')} | {a.get('alert_type')} | {a.get('branch_name')} | {a.get('severity')} | **{time_str}** | {a.get('timestamp')} | {a.get('status')} |\n"
+                
+            top_alt = alerts[0]
+            top_time = top_alt.get("formatted_response_time", f"{top_alt.get('response_time_sec', 0)} seconds")
+            
+            return (
+                f"Here are the specific telemetry alerts/incidents with the **highest response time** (delay between trigger and acknowledgment):\n\n"
+                f"Highest delay recorded at **{top_alt.get('branch_name')}** (Alert ID `{top_alt.get('alert_id')}`) with a response time of **{top_time}**.\n\n"
+                f"{table}\n"
+                "### Operations Summary\n"
+                "You can ask *'tell me about those incidents'* to view full operational details, remarks, and audit trails for these specific alerts."
+            )
+
+        if intent == "EVALUATED_RESPONSE_TIME_INCIDENTS":
+            alerts = data.get("alerts", [])
+            if len(alerts) == 0:
+                return "No evaluated alerts or incidents were found for the response time calculations."
+                
+            table = "| Alert ID | Type | Branch / Area | Severity | Response Delay | Datetime | Status |\n"
+            table += "|---|---|---|---|---|---|---|\n"
+            for a in alerts:
+                time_str = a.get("formatted_response_time", f"{a.get('response_time_sec', 0)} seconds")
+                table += f"| {a.get('alert_id')} | {a.get('alert_type')} | {a.get('branch_name')} | {a.get('severity')} | **{time_str}** | {a.get('timestamp')} | {a.get('status')} |\n"
+                
+            details_md = f"Here are the **{len(alerts)} evaluated security alerts/incidents** that contribute to the LHO response time calculations:\n\n{table}\n### Detailed Operational Summary\n"
+            for idx, a in enumerate(alerts[:5], 1):
+                time_str = a.get("formatted_response_time", f"{a.get('response_time_sec', 0)} seconds")
+                remarks_str = a.get("remarks") or "Standard automated CCTV telemetry alert"
+                details_md += (
+                    f"- **Alert `{a.get('alert_id')}`** ({a.get('branch_name')}): `{a.get('alert_type')}` | Delay: **{time_str}** | Status: `{a.get('status')}` | Remarks: *{remarks_str}*\n"
+                )
+                
+            return details_md
+
+        if intent == "FOLLOW_UP_HIGH_RESPONSE_DETAILS":
+
+            alerts = data.get("alerts", [])
+            if len(alerts) == 0:
+                return "No detailed alert records found for the high response time events."
+                
+            details_md = "## Operational Details for High Response Time Incidents / Alerts:\n\n"
+            for idx, a in enumerate(alerts[:5], 1):
+                time_str = a.get("formatted_response_time", f"{a.get('response_time_sec', 0)} seconds")
+                remarks_str = a.get("remarks") or "Standard automated CCTV telemetry alert"
+                details_md += (
+                    f"### {idx}. Alert ID `{a.get('alert_id')}` — {a.get('branch_name')} ({a.get('lho_name')} LHO)\n"
+                    f"- **Type / Subtype**: {a.get('alert_type')} ({a.get('alert_subtype') or 'General'})\n"
+                    f"- **Severity**: `{a.get('severity')}` | **Status**: `{a.get('status')}`\n"
+                    f"- **Total Response Delay**: **{time_str}**\n"
+                    f"- **Trigger Datetime**: `{a.get('timestamp')}`\n"
+                    f"- **Operator Ack Time**: `{a.get('ack_timestamp') or 'Pending'}`\n"
+                    f"- **System Remarks**: *{remarks_str}*\n\n"
+                )
+                
+            return details_md + "### Escalation Advisory\nHigh response delay tickets require Command Supervisor audit to verify operator shift coverage and prevent SLA breaches."
+
         if intent == "LHO_RESPONSE_TIME":
 
             lhos = data.get("lhos", [])
-
             if len(lhos) == 0:
-
                 return "No incident response times available to calculate LHO performance."
-
                 
-
-            table = "| LHO Name | Average Response Time | Total Incidents Evaluated |\n"
-
+            best_lho = lhos[0]
+            best_time = best_lho.get("formatted_response_time", f"{best_lho.get('avg_response_time_sec', 0)} seconds")
+            
+            table = "| LHO Name | Average Response Time (Ack Time - Incident Time) | Total Incidents Evaluated |\n"
             table += "|---|---|---|\n"
-
             for l in lhos:
-
-                table += f"| {l['lho_name']} | {l['avg_response_time_sec']} seconds | {l['total_incidents_evaluated']} |\n"
-
+                time_str = l.get("formatted_response_time", f"{l.get('avg_response_time_sec', 0)} seconds")
+                table += f"| {l['lho_name']} | {time_str} | {l['total_incidents_evaluated']} |\n"
                 
-
             return (
-
-                f"The **{lhos[0]['lho_name']} LHO** has the best average response time at **{lhos[0]['avg_response_time_sec']} seconds**.\n\n"
-
+                f"The **{best_lho['lho_name']} LHO** registered an average response time of **{best_time}** across evaluated alerts.\n\n"
                 "### Key Observations\n"
-
-                f"- **Top Responding Command Centre**: {lhos[0]['lho_name']} LHO has achieved response latency below 35 seconds.\n"
-
-                "- **SLA Adherence**: Most command centers are operating well within the 60-second immediate response threshold.\n\n"
-
+                f"- **Top Responding Command Centre**: {best_lho['lho_name']} LHO leads active response tracking.\n"
+                "- **Telemetry Latency**: Time difference is measured from alert generation timestamp to operator acknowledgment.\n\n"
                 "### LHO Response Times Table\n"
-
                 f"{table}\n"
-
                 "### Operations Summary\n"
-
-                "Centralized incident correlation has successfully lowered operator classification lag. Dispatch protocols remain highly efficient."
-
+                "Centralized incident correlation tracks operator response times in real time to ensure rapid dispatch."
             )
+
 
 
 

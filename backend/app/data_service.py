@@ -1,12 +1,20 @@
 import os
+import sys
 import json
+
 import urllib.parse
 import re
 from datetime import datetime
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, text
 
-# Load variables from .env (checks both backend/.env and root .env)
+# Load variables from .env (checks sys.executable directory, cwd, backend/.env, and root .env)
+if getattr(sys, 'frozen', False):
+    exe_dir = os.path.dirname(sys.executable)
+    exe_env = os.path.join(exe_dir, ".env")
+    if os.path.exists(exe_env):
+        load_dotenv(exe_env)
+
 env_backend = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env")
 if os.path.exists(env_backend):
     load_dotenv(env_backend)
@@ -22,7 +30,7 @@ class DataService:
         # Read database parameters (both formats)
         db_url = os.getenv("DATABASE_URL")
         db_user = os.getenv("DB_USER", "sa")
-        password = os.getenv("DB_PASSWORD")
+        password = os.getenv("DB_PASSWORD", "Iccc@321")
         host = os.getenv("DB_HOST", "198.38.87.117")
         port = os.getenv("DB_PORT", "1433")
         dbname = os.getenv("DB_NAME", "OmniDash_CMS")
@@ -65,14 +73,18 @@ class DataService:
                 with self.engine.connect() as conn:
                     conn.execute(text("SELECT 1"))
                 self.use_sql_server = True
+                self.connection_error = None
                 print(f"[DATABASE] Connected successfully to live SQL Server.")
             except Exception as e:
-                print(f"[DATABASE WARNING] Failed to connect to SQL Server: {e}")
-                print("[DATABASE] Falling back to local failsafe JSON database mode.")
-                self.setup_in_memory_sqlite()
+                print(f"[DATABASE ERROR] Failed to connect to SQL Server: {e}")
+                self.use_sql_server = False
+                self.engine = None
+                self.connection_error = "Server cannot be connected."
         else:
-            print("[DATABASE] DB Connection not configured. Running in local JSON database mode.")
-            self.setup_in_memory_sqlite()
+            print("[DATABASE] DB Connection not configured.")
+            self.use_sql_server = False
+            self.engine = None
+            self.connection_error = "Server cannot be connected."
 
     def _load_json_data(self):
         """Helper to read mock JSON fallback database"""
@@ -85,7 +97,13 @@ class DataService:
         """Creates an in-memory SQLite database populated with mapped data from db.json"""
         print("[DATABASE] Setting up in-memory SQLite database for universal SQL querying...")
         try:
-            self.engine = create_engine("sqlite:///:memory:", connect_args={"timeout": 5})
+            from sqlalchemy.pool import StaticPool
+            self.engine = create_engine(
+                "sqlite:///:memory:", 
+                connect_args={"check_same_thread": False},
+                poolclass=StaticPool
+            )
+
             db = self._load_json_data()
             
             with self.engine.connect() as conn:
@@ -101,11 +119,12 @@ class DataService:
                 """))
                 cams = db.get("cameras", [])
                 for idx, c in enumerate(cams):
-                    c_id = int(re.findall(r'\d+', c.get("camera_id", "0"))[0]) if re.findall(r'\d+', c.get("camera_id", "")) else idx + 1
+                    c_id = idx + 1
                     conn.execute(text("""
-                        INSERT INTO CameraList (CameraId, CameraName, CameraLocation, Area, Status)
+                        INSERT OR IGNORE INTO CameraList (CameraId, CameraName, CameraLocation, Area, Status)
                         VALUES (:id, :name, :loc, :area, :status)
                     """), {
+
                         "id": c_id,
                         "name": c.get("camera_name"),
                         "loc": c.get("location"),
@@ -249,72 +268,33 @@ class DataService:
     # Local Failsafe Fallbacks (aggregates from db.json)
     # ==================================================
     def _fallback_dashboard_summary(self):
-        db = self._load_json_data()
-        cams = db.get("cameras", [])
-        incidents = db.get("incidents", [])
-        alerts = db.get("alerts", [])
-        
-        total_dev = len(cams) + 20
-        offline_cams = sum(1 for c in cams if c["status"] == "Offline")
-        total_off = offline_cams + 2
-        total_on = total_dev - total_off
-        health = round((total_on / total_dev) * 100, 1) if total_dev > 0 else 100.0
-        
         return {
-            "lhos_count": len(db.get("lhos", [])),
-            "branches_count": len(db.get("branches", [])),
-            "total_devices": total_dev,
-            "total_online": total_on,
-            "total_offline": total_off,
-            "offline_cameras": offline_cams,
-            "system_health_pct": health,
-            "active_incidents_count": sum(1 for i in incidents if i["status"] in ["Open", "In-Progress"]),
-            "critical_incidents_count": sum(1 for i in incidents if i["status"] in ["Open", "In-Progress"] and i["severity"] == "Critical"),
-            "alerts_today_count": sum(1 for a in alerts if a.get("timestamp", "").startswith(datetime.now().strftime("%Y-%m-%d"))),
-            "total_alerts_count": len(alerts),
-            "unacknowledged_alerts_count": sum(1 for a in alerts if not a["acknowledged"])
+            "error": "Server cannot be connected.",
+            "lhos_count": 0,
+            "branches_count": 0,
+            "total_devices": 0,
+            "total_online": 0,
+            "total_offline": 0,
+            "offline_cameras": 0,
+            "system_health_pct": 0.0,
+            "active_incidents_count": 0,
+            "critical_incidents_count": 0,
+            "alerts_today_count": 0,
+            "total_alerts_count": 0,
+            "unacknowledged_alerts_count": 0
         }
 
     def _fallback_offline_cameras(self, city=None):
-        db = self._load_json_data()
-        cams = db.get("cameras", [])
-        branches = db.get("branches", [])
-        
-        offline = [c for c in cams if c["status"] == "Offline"]
-        if city:
-            city_branches = [b["branch_name"].lower() for b in branches if b["city"].lower() == city.lower() or b["lho_name"].lower() == city.lower()]
-            offline = [c for c in offline if c["branch_name"].lower() in city_branches]
-        return offline
+        return []
 
     def _fallback_incidents(self, lho_name=None, status=None, branch_name=None):
-        db = self._load_json_data()
-        incidents = db.get("incidents", [])
-        if lho_name:
-            incidents = [i for i in incidents if i["lho_name"].lower() == lho_name.lower()]
-        if status:
-            if status == "open_active":
-                incidents = [i for i in incidents if i["status"] in ["Open", "In-Progress"]]
-            else:
-                incidents = [i for i in incidents if i["status"].lower() == status.lower()]
-        if branch_name:
-            incidents = [i for i in incidents if i["branch_name"].lower() == branch_name.lower()]
-        return incidents
+        return []
 
     def _fallback_incident_details(self, incident_id):
-        db = self._load_json_data()
-        inc = next((i for i in db.get("incidents", []) if i["incident_id"] == incident_id), None)
-        if not inc:
-            return None
-        alert = next((a for a in db.get("alerts", []) if a["alert_id"] == inc.get("linked_alert_id")), None)
-        return {"incident": inc, "alert": alert}
+        return None
 
     def _fallback_alert_details(self, alert_type, branch_name):
-        db = self._load_json_data()
-        alert = next((a for a in db.get("alerts", []) if a["alert_type"].lower() == alert_type.lower() and a["branch_name"].lower() == branch_name.lower()), None)
-        if not alert:
-            return None
-        incident = next((i for i in db.get("incidents", []) if i.get("linked_alert_id") == alert.get("alert_id")), None)
-        return {"alert": alert, "incident": incident}
+        return None
 
     # ==================================================
     # 1. Dashboard summary aggregation
@@ -412,6 +392,28 @@ class DataService:
         db = self._load_json_data()
         cams = db.get("cameras", [])
         return [c for c in cams if area_name.lower() in c.get("branch_name", "").lower() or area_name.lower() in c.get("location", "").lower()]
+
+    def get_all_locations(self):
+        """Dynamically fetches all unique area, location, and branch names from the live database."""
+        if self.use_sql_server and self.engine is not None:
+            try:
+                query = """
+                    SELECT DISTINCT TRIM(Area) as loc FROM CameraList WHERE Area IS NOT NULL AND TRIM(Area) != ''
+                    UNION
+                    SELECT DISTINCT TRIM(CameraLocation) as loc FROM CameraList WHERE CameraLocation IS NOT NULL AND TRIM(CameraLocation) != ''
+                    UNION
+                    SELECT DISTINCT TRIM(Area) as loc FROM AlertsDetails WHERE Area IS NOT NULL AND TRIM(Area) != ''
+                    UNION
+                    SELECT DISTINCT TRIM(Location) as loc FROM AlertsDetails WHERE Location IS NOT NULL AND TRIM(Location) != ''
+                    UNION
+                    SELECT DISTINCT TRIM(Location) as loc FROM Location_Master WHERE Location IS NOT NULL AND TRIM(Location) != ''
+                """
+                with self.engine.connect() as conn:
+                    res = conn.execute(text(query)).scalars().all()
+                    return [str(r) for r in res if r]
+            except Exception as e:
+                print(f"[SQL ERROR] get_all_locations failed: {e}")
+        return []
 
     def get_camera_counts_by_type(self):
         """Aggregates online and offline camera counts grouped by device type"""
@@ -727,8 +729,28 @@ class DataService:
                     results = [dict(r) for r in res.mappings()]
                     if results:
                         return results
+                    
+                    # If Incident_Data is empty, query usr_mstr directory directly
+                    user_query = """
+                        SELECT 
+                            (COALESCE(fname, '') + ' ' + COALESCE(lname, '')) as operator_name,
+                            COALESCE(AccessLocation, 'Central LHO') as lho_name,
+                            0 as active_incidents,
+                            0 as closed_incidents,
+                            0 as total_handled_today,
+                            role,
+                            contactno,
+                            email
+                        FROM usr_mstr
+                        WHERE usr_id IS NOT NULL
+                    """
+                    res_user = conn.execute(text(user_query))
+                    user_results = [dict(r) for r in res_user.mappings()]
+                    if user_results:
+                        return user_results
             except Exception as e:
                 print(f"[SQL ERROR] get_operator_performance failed: {e}")
+
                 
         # Local JSON aggregator fallback / operator registry
         db = self._load_json_data()
@@ -804,10 +826,22 @@ class DataService:
                 val["false_alert_rate_pct"] = round((val["false_alerts"] / val["total_alerts"]) * 100, 1)
         return sorted(stats.values(), key=lambda x: x["false_alert_rate_pct"], reverse=True)
 
-    # ==================================================
-    # 10. Circle response averages (SLA)
-    # ==================================================
+    def format_seconds_human(self, seconds):
+        if seconds is None or seconds < 0:
+            return "N/A"
+        sec = int(round(seconds))
+        if sec < 60:
+            return f"{sec} seconds"
+        mins = sec // 60
+        rem_sec = sec % 60
+        if mins < 60:
+            return f"{mins} mins {rem_sec} secs"
+        hours = mins // 60
+        rem_mins = mins % 60
+        return f"{hours} hrs {rem_mins} mins {rem_sec} secs"
+
     def get_lho_response_times(self):
+
         if self.use_sql_server:
             try:
                 query = """
@@ -825,19 +859,126 @@ class DataService:
                     lhos = []
                     for r in res.mappings():
                         lh = dict(r)
-                        if not lh.get("avg_response_time_sec"):
-                            lh["avg_response_time_sec"] = 42
+                        sec = lh.get("avg_response_time_sec") or 42
+                        lh["avg_response_time_sec"] = sec
+                        lh["formatted_response_time"] = self.format_seconds_human(sec)
                         lhos.append(lh)
-                    return lhos
+                    if lhos:
+                        return lhos
             except Exception as e:
                 print(f"[SQL ERROR] get_lho_response_times failed: {e}")
                 
         return [
-            {"lho_name": "Bhopal LHO", "avg_response_time_sec": 34, "total_incidents_evaluated": 12},
-            {"lho_name": "Mumbai Metro LHO", "avg_response_time_sec": 38, "total_incidents_evaluated": 15},
-            {"lho_name": "New Delhi LHO", "avg_response_time_sec": 42, "total_incidents_evaluated": 8},
-            {"lho_name": "Bengaluru LHO", "avg_response_time_sec": 45, "total_incidents_evaluated": 10}
+            {"lho_name": "Bhopal LHO", "avg_response_time_sec": 34, "formatted_response_time": "34 seconds", "total_incidents_evaluated": 12},
+            {"lho_name": "Mumbai Metro LHO", "avg_response_time_sec": 38, "formatted_response_time": "38 seconds", "total_incidents_evaluated": 15},
+            {"lho_name": "New Delhi LHO", "avg_response_time_sec": 42, "formatted_response_time": "42 seconds", "total_incidents_evaluated": 8},
+            {"lho_name": "Bengaluru LHO", "avg_response_time_sec": 45, "formatted_response_time": "45 seconds", "total_incidents_evaluated": 10}
         ]
+
+    def get_high_response_time_alerts(self, limit=10):
+        if self.use_sql_server:
+            try:
+                query = f"""
+                    SELECT TOP {int(limit)}
+                        AlertID as alert_id,
+                        AlertType as alert_type,
+                        AlertSubtype as alert_subtype,
+                        TRIM(COALESCE(Area, Location)) as branch_name,
+                        COALESCE(Zone, 'NEW DELHI') as lho_name,
+                        Datetime as timestamp,
+                        AckTime as ack_timestamp,
+                        DATEDIFF(second, Datetime, AckTime) as response_time_sec,
+                        Severity as severity,
+                        Status as status,
+                        Remarks as remarks
+                    FROM AlertsDetails
+                    WHERE AckTime IS NOT NULL AND Datetime IS NOT NULL AND DATEDIFF(second, Datetime, AckTime) > 0
+                    ORDER BY response_time_sec DESC
+                """
+                with self.engine.connect() as conn:
+                    rows = conn.execute(text(query)).mappings().all()
+                    alerts = []
+                    for r in rows:
+                        a = dict(r)
+                        sec = a.get("response_time_sec") or 0
+                        a["formatted_response_time"] = self.format_seconds_human(sec)
+                        if isinstance(a.get("timestamp"), datetime):
+                            a["timestamp"] = a["timestamp"].isoformat()
+                        if isinstance(a.get("ack_timestamp"), datetime):
+                            a["ack_timestamp"] = a["ack_timestamp"].isoformat()
+                        alerts.append(a)
+                    if alerts:
+                        return alerts
+            except Exception as e:
+                print(f"[SQL ERROR] get_high_response_time_alerts failed: {e}")
+                
+        db = self._load_json_data()
+        alerts = db.get("alerts", [])
+        for a in alerts:
+            a["formatted_response_time"] = "15 mins 30 secs"
+        return alerts[:limit]
+
+    def get_alerts_by_response_threshold(self, max_seconds=None, min_seconds=None, severity=None, location=None, limit=30):
+        if self.use_sql_server:
+            try:
+                where_clauses = ["AckTime IS NOT NULL", "Datetime IS NOT NULL"]
+                params = {}
+
+                if severity:
+                    where_clauses.append("Severity = :sev")
+                    params["sev"] = str(severity).title()
+                if max_seconds is not None:
+                    where_clauses.append("DATEDIFF(second, Datetime, AckTime) <= :max_sec")
+                    params["max_sec"] = int(max_seconds)
+                if min_seconds is not None:
+                    where_clauses.append("DATEDIFF(second, Datetime, AckTime) >= :min_sec")
+                    params["min_sec"] = int(min_seconds)
+
+                if location:
+                    where_clauses.append("(Area LIKE :loc OR Location LIKE :loc OR Zone LIKE :loc)")
+                    params["loc"] = f"%{location}%"
+
+
+                where_str = " AND ".join(where_clauses)
+                query = f"""
+                    SELECT TOP {int(limit)}
+                        AlertID as alert_id,
+                        AlertType as alert_type,
+                        AlertSubtype as alert_subtype,
+                        TRIM(COALESCE(Area, Location)) as branch_name,
+                        COALESCE(Zone, 'NEW DELHI') as lho_name,
+                        Datetime as timestamp,
+                        AckTime as ack_timestamp,
+                        DATEDIFF(second, Datetime, AckTime) as response_time_sec,
+                        Severity as severity,
+                        Status as status,
+                        Remarks as remarks
+                    FROM AlertsDetails
+                    WHERE {where_str}
+                    ORDER BY response_time_sec ASC
+                """
+                with self.engine.connect() as conn:
+                    rows = conn.execute(text(query), params).mappings().all()
+                    alerts = []
+                    for r in rows:
+                        a = dict(r)
+                        sec = a.get("response_time_sec") or 0
+                        a["formatted_response_time"] = self.format_seconds_human(sec)
+                        if isinstance(a.get("timestamp"), datetime):
+                            a["timestamp"] = a["timestamp"].isoformat()
+                        if isinstance(a.get("ack_timestamp"), datetime):
+                            a["ack_timestamp"] = a["ack_timestamp"].isoformat()
+                        alerts.append(a)
+                    return alerts
+            except Exception as e:
+                print(f"[SQL ERROR] get_alerts_by_response_threshold failed: {e}")
+
+        db = self._load_json_data()
+        alerts = db.get("alerts", [])
+        return alerts[:limit]
+
+
+
 
     # ==================================================
     # 11. Custom aggregations (Tampering, breaches, etc.)
@@ -1026,9 +1167,10 @@ class DataService:
         if self.use_sql_server:
             try:
                 query = """
-                    SELECT COALESCE(Area, Location) as branch_name, COUNT(*) as alert_count 
+                    SELECT TRIM(COALESCE(Area, Location)) as branch_name, COUNT(*) as alert_count 
                     FROM AlertsDetails 
-                    GROUP BY Area, Location
+                    WHERE Area IS NOT NULL AND Area != ''
+                    GROUP BY TRIM(COALESCE(Area, Location))
                     ORDER BY alert_count DESC
                 """
                 with self.engine.connect() as conn:
@@ -1050,21 +1192,82 @@ class DataService:
         if self.engine is not None:
             try:
                 query = """
-                    SELECT DISTINCT branch_name FROM (
-                        SELECT Location as branch_name FROM Location_Master WHERE Location IS NOT NULL AND Location != ''
-                        UNION
-                        SELECT Area as branch_name FROM CameraList WHERE Area IS NOT NULL AND Area != ''
-                        UNION
-                        SELECT Area as branch_name FROM AlertsDetails WHERE Area IS NOT NULL AND Area != ''
-                    ) AS UnionBranches
+                    SELECT DISTINCT TRIM(Area) as branch_name FROM AlertsDetails 
+                    WHERE Area IS NOT NULL AND Area != '' 
+                      AND Area NOT IN ('Quila', 'Civil Lines', 'Chowki Chauraha', 'Junction', 'Aonla', 'Jankipuram', 'JnK')
                     ORDER BY branch_name
                 """
                 with self.engine.connect() as conn:
                     rows = conn.execute(text(query)).mappings().all()
-                    return [{"branch_name": r["branch_name"], "branch_id": f"BR-{idx+1:03d}"} for idx, r in enumerate(rows)]
+                    if rows:
+                        return [{"branch_name": r["branch_name"], "branch_id": f"BR-{idx+1:03d}"} for idx, r in enumerate(rows)]
             except Exception as e:
                 print(f"[SQL ERROR] get_branches failed: {e}")
                 
         # JSON Failsafe fallback
         db = self._load_json_data()
         return db.get("branches", [])
+
+
+    def get_branches_by_lho(self, lho_name):
+        if self.use_sql_server:
+            try:
+                query = """
+                    SELECT DISTINCT TRIM(COALESCE(Area, Location)) as branch_name, COALESCE(Zone, 'NEW DELHI') as lho_name
+                    FROM AlertsDetails
+                    WHERE (Zone LIKE :lho OR Location LIKE :lho OR Area LIKE :lho)
+                      AND Area IS NOT NULL AND Area != ''
+                      AND Area NOT IN ('Quila', 'Civil Lines', 'Chowki Chauraha', 'Junction', 'Aonla', 'Jankipuram', 'JnK')
+                """
+                with self.engine.connect() as conn:
+                    rows = conn.execute(text(query), {"lho": f"%{lho_name}%"}).mappings().all()
+                    if rows:
+                        return [dict(r) for r in rows]
+            except Exception as e:
+                print(f"[SQL ERROR] get_branches_by_lho failed: {e}")
+                
+        db = self._load_json_data()
+        branches = db.get("branches", [])
+        return [b for b in branches if lho_name.lower() in b.get("lho_name", "").lower()]
+
+    def get_priority_alerts(self, severity, location=None):
+        if self.use_sql_server:
+            try:
+                query = """
+                    SELECT TOP 30
+                        AlertID as alert_id,
+                        AlertType as alert_type,
+                        AlertSubtype as alert_subtype,
+                        TRIM(COALESCE(Area, Location)) as branch_name,
+                        Zone as lho_name,
+                        Severity as severity,
+                        Datetime as timestamp,
+                        Status as status
+                    FROM AlertsDetails
+                    WHERE Severity LIKE :sev
+                """
+                params = {"sev": f"%{severity}%"}
+                if location:
+                    query += " AND (Area LIKE :loc OR Location LIKE :loc OR Zone LIKE :loc)"
+                    params["loc"] = f"%{location}%"
+                query += " ORDER BY Datetime DESC"
+                
+                with self.engine.connect() as conn:
+                    res = conn.execute(text(query), params)
+                    alerts = []
+                    for r in res.mappings():
+                        a = dict(r)
+                        if isinstance(a.get("timestamp"), datetime):
+                            a["timestamp"] = a["timestamp"].isoformat()
+                        alerts.append(a)
+                    return alerts
+            except Exception as e:
+                print(f"[SQL ERROR] get_priority_alerts failed: {e}")
+                
+        db = self._load_json_data()
+        alerts = db.get("alerts", [])
+        res = [a for a in alerts if severity.lower() in a.get("severity", "").lower()]
+        if location:
+            res = [a for a in res if location.lower() in a.get("branch_name", "").lower() or location.lower() in a.get("lho_name", "").lower()]
+        return res
+

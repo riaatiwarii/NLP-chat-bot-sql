@@ -30,10 +30,31 @@ app.add_middleware(
 data_service = DataService()
 chatbot_service = ChatbotService(data_service)
 
+import sys
+
 # Mount Plugin Assets Directory (serves widget.js, widget.css, and demo.html)
-plugin_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "plugin_assets"))
-if os.path.exists(plugin_dir):
+possible_plugin_dirs = [
+    os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "plugin_assets")),
+    os.path.abspath(os.path.join(os.path.dirname(__file__), "plugin_assets")),
+    os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "backend", "plugin_assets")),
+]
+if getattr(sys, 'frozen', False):
+    bundle_dir = getattr(sys, '_MEIPASS', os.path.dirname(sys.executable))
+    possible_plugin_dirs.insert(0, os.path.join(bundle_dir, "backend", "plugin_assets"))
+    possible_plugin_dirs.insert(0, os.path.join(bundle_dir, "plugin_assets"))
+
+plugin_dir = None
+for p_dir in possible_plugin_dirs:
+    if os.path.exists(p_dir):
+        plugin_dir = p_dir
+        break
+
+if plugin_dir:
+    print(f"[STATIC ASSETS] Mounting /plugin static assets from: {plugin_dir}")
     app.mount("/plugin", StaticFiles(directory=plugin_dir, html=True), name="plugin")
+else:
+    print("[STATIC ASSETS WARNING] plugin_assets directory not found!")
+
 
 # Request / Response Schemas
 class ChatRequest(BaseModel):

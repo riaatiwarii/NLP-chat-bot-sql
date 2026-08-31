@@ -1,4 +1,55 @@
+# Environment variables & secrets
 .env
-node_modules 
-.venv 
-_pycache__
+*.env
+.env.*
+
+# Python bytecode & runtime cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual Environments
+.venv/
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# PyInstaller Build & Executable Output
+build/
+dist/
+*.spec
+
+# Node.js & Frontend dependencies
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.next/
+out/
+
+# Application Logs & Temporary files
+*.log
+logs/
+backend/app/logs/
+
+# IDE & Editor Configurations
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+*.sublime-workspace
+*.sublime-project
+
+# Operating System Files
+.DS_Store
+Thumbs.db
+Desktop.ini
