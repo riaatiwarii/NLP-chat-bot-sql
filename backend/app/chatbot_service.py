@@ -521,30 +521,23 @@ class ChatbotService:
         if any(w in msg_lower for w in ["system health", "health percentage", "health status", "overall health"]):
             return False
 
-        # Any query asking about alerts, cameras, incidents, counts, totals, or database metrics MUST go to SQL engine
-        if any(w in msg_lower for w in ["alert", "alerts", "cctv", "camera", "cameras", "incident", "incidents", "count", "total", "how many", "number of"]):
-            return True
-
-        if any(w in msg_lower for w in ["highest number", "highest alerts", "highest alert", "most alerts", "branch has highest"]):
-            return True
-
-        comp_keywords = [
-            "below", "above", "greater than", "less than", "more than",
-            "exceeding", "between", "except", "excluding", "exclude", "percentage", "percent",
-            "ratio", "slowest", "fastest", "longer than", "shorter than", "top 3",
-            "top 5", "highest closed", "lowest response", "registered on", "alerts on",
-            "july 31", "31st july", "july 28", "28th july", "closed", "pending", "completed", "acknowledged", "ack", "resolved",
-            "high priority", "low priority", "medium priority", "high severity", "low severity",
-            "medium", "low", "yesterday", "today", "by branch", "by branches", "grouped", "group",
-            "summary", "overview", "report", "breakdown"
+        # Universal Database Query Classifier: Action or Attribute words
+        action_words = [
+            "show", "list", "count", "get", "breakdown", "distribution", "categorize", "split", "summary",
+            "average", "avg", "total", "highest", "lowest", "top", "how many", "number of", "percentage",
+            "percent", "ratio", "below", "above", "under", "exceeding", "greater than", "less than", "more than"
         ]
-        if any(kw in msg_lower for kw in comp_keywords):
+        attribute_words = [
+            "alert", "alerts", "cctv", "camera", "cameras", "incident", "incidents", "severity", "priority",
+            "status", "type", "event", "response time", "delay", "latency", "operator", "branch", "branches", "location",
+            "area", "zone", "lho", "lhos", "circle", "circles", "high", "medium", "low", "critical", "severe", "closed", "pending", "active", "acknowledged"
+        ]
+
+        if any(w in msg_lower for w in action_words) or any(w in msg_lower for w in attribute_words):
             return True
 
-        if re.search(r'\bhigh\b', msg_lower):
-            return True
-
-        if re.search(r'\bunder\b', msg_lower):
+        # Check if query contains any live DB location or live alert type
+        if self._extract_location_filter(msg_lower) or self._extract_alert_type_filter(msg_lower):
             return True
 
         if re.search(r'\b\d+\s*(?:sec|second|seconds|min|mins|minute|minutes|hr|hrs|hour|hours)\b', msg_lower):
@@ -637,7 +630,11 @@ class ChatbotService:
                 return loc_str
 
         # 2. Pattern Matching (e.g. "in lucknow", "at kanpur", "for mumbai")
-        loc_match = re.search(r'\b(?:in|at|from|for|of)\s+([a-z0-9\s_-]+)\b', msg_lower)
+        # Clean date expressions from msg_lower before matching pattern
+        clean_msg = re.sub(r'\b(?:\d{1,2}\s+)?(?:january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|aug|sep|sept|oct|nov|dec)(?:\s+\d{1,2})?\b', '', msg_lower)
+        clean_msg = re.sub(r'\b\d{1,2}(?:st|nd|rd|th)?\s+(?:january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|aug|sep|sept|oct|nov|dec)\b', '', clean_msg)
+
+        loc_match = re.search(r'\b(?:in|at|from|for|of)\s+([a-z0-9\s_-]+)\b', clean_msg)
         if loc_match:
             candidate = loc_match.group(1).strip()
             stop_words = [
@@ -647,12 +644,34 @@ class ChatbotService:
                 "response", "time", "delay", "latency", "sla", "operator", "handled", "workload", "incident", "incidents",
                 "breakdown", "distribution", "category", "type", "event", "zone", "lho", "branch", "location", "area",
                 "month", "week", "year", "date", "number", "count", "percent", "ratio", "share", "severity alert",
-                "high severity", "medium severity", "low severity", "high severity alert", "medium severity alert"
+                "high severity", "medium severity", "low severity", "high severity alert", "medium severity alert",
+                "january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december",
+                "jan", "feb", "mar", "apr", "jun", "jul", "aug", "sep", "oct", "nov", "dec"
             ]
             cand_words = candidate.split()
             # Discard if candidate contains any stop word or if candidate is not a valid location
-            if not any(sw in candidate for sw in stop_words) and len(candidate) >= 3:
+            if not any(sw in candidate for sw in stop_words) and len(candidate) >= 3 and not re.match(r'^\d+\s*$', candidate):
                 return candidate.title()
+
+        return None
+
+    def _extract_alert_type_filter(self, msg_lower: str) -> str:
+        """Dynamically matches prompt text against live DB alert types fetched from SQL Server."""
+        alert_types = []
+        if hasattr(self, "ds") and self.ds:
+            try:
+                alert_types = self.ds.get_all_alert_types()
+            except Exception as e:
+                print(f"[ALERT TYPE EXTRACTOR WARNING] Failed to fetch DB alert types: {e}")
+
+        if not alert_types:
+            alert_types = ["Analytics", "VMS", "SAS", "VideoAnalytics"]
+
+        sorted_types = sorted(alert_types, key=lambda x: len(str(x)), reverse=True)
+        for at in sorted_types:
+            at_str = str(at)
+            if re.search(r'\b' + re.escape(at_str.lower()) + r'\b', msg_lower):
+                return at_str
 
         return None
 
@@ -660,9 +679,17 @@ class ChatbotService:
         msg_lower = msg.lower().strip()
 
         # 0.001 Total System Alerts Handler ("count of total alerts", "total alerts", "how many total alerts")
+        has_type = bool(self._extract_alert_type_filter(msg_lower))
+        has_loc = bool(self._extract_location_filter(msg_lower, context))
+        has_date = bool(self._extract_dates_from_query(msg_lower)[0])
         is_total_count = (
             any(phrase in msg_lower for phrase in ["count of total alerts", "total alert count", "total alerts count", "count of alerts", "total number of alerts", "total count of alerts"])
-            or (("alert" in msg_lower or "alerts" in msg_lower) and any(w in msg_lower for w in ["count", "total", "how many", "number of"]) and not any(w in msg_lower for w in ["group", "branch", "severity", "status", "today", "yesterday", "camera", "cctv", "high", "medium", "low", "closed", "pending", "active"]))
+            or (
+                ("alert" in msg_lower or "alerts" in msg_lower)
+                and any(w in msg_lower for w in ["count", "total", "how many", "number of"])
+                and not (has_type or has_loc or has_date)
+                and not any(w in msg_lower for w in ["group", "branch", "severity", "status", "today", "yesterday", "camera", "cctv", "high", "medium", "low", "closed", "pending", "active", "type", "where", "response", "below", "above", "under", "exceeding"])
+            )
         )
         if is_total_count:
             if self.ds.use_sql_server:
@@ -693,6 +720,58 @@ class ChatbotService:
                         ), context
                 except Exception as e:
                     print(f"[COMPLEX QUERY ERROR] Total alerts query failed: {e}")
+
+        # 0.002 LHO / Circle Listing Handler ("List the LHOs", "LHO command circles", "list LHO circles", "show LHOs", "all LHO command centers")
+        if re.search(r'\b(lho|lhos|command circles|lho circles|lho centers|command centers)\b', msg_lower) and not any(w in msg_lower for w in ["incident", "incidents", "alert", "alerts", "camera", "cameras", "response time", "delay", "slowest"]):
+            if self.ds.use_sql_server:
+                try:
+                    q = """
+                        SELECT DISTINCT TRIM(Zone) as lho_name FROM AlertsDetails WHERE Zone IS NOT NULL AND TRIM(Zone) != ''
+                        UNION
+                        SELECT DISTINCT TRIM(Location) as lho_name FROM Location_Master WHERE Location IS NOT NULL AND TRIM(Location) != ''
+                        ORDER BY lho_name ASC
+                    """
+                    with self.ds.engine.connect() as conn:
+                        rows = conn.execute(text(q)).fetchall()
+                        lho_list = [r[0] for r in rows if r[0]]
+
+                        tbl = "| # | LHO Circle / Command Centre |\n|---|---|\n"
+                        for idx, lho_item in enumerate(lho_list, 1):
+                            tbl += f"| {idx} | **{lho_item}** |\n"
+
+                        return (
+                            f"The Centralized Monitoring System monitors **{len(lho_list)} Local Head Office (LHO) Circles**:\n\n"
+                            f"### SBI LHO Command Circles\n{tbl}\n"
+                            f"*(Note: All monitored branches and camera telemetry report to these central LHO command circles).* "
+                        ), context
+                except Exception as e:
+                    print(f"[COMPLEX QUERY ERROR] List LHOs query failed: {e}")
+
+        # 0.003 Monitored Branches Listing Handler ("list the branches", "list branches", "show branches", "all branches", "monitored branches")
+        if (any(w in msg_lower for w in ["branch", "branches", "locations", "sites"]) and any(w in msg_lower for w in ["list", "show", "get", "all", "monitored", "configured"])) or msg_lower in ["branches", "list branches", "list the branches", "all branches"]:
+            if self.ds.use_sql_server:
+                try:
+                    q = """
+                        SELECT 
+                            TRIM(COALESCE(Area, Location)) as branch_name, 
+                            COUNT(*) as total_alerts
+                        FROM AlertsDetails 
+                        GROUP BY TRIM(COALESCE(Area, Location))
+                        ORDER BY total_alerts DESC
+                    """
+                    with self.ds.engine.connect() as conn:
+                        rows = conn.execute(text(q)).mappings().all()
+                        tbl = "| # | Monitored Branch / Area | Registered Alerts |\n|---|---|---|\n"
+                        for idx, r in enumerate(rows, 1):
+                            tbl += f"| {idx} | **{r['branch_name']}** | {r['total_alerts']:,} |\n"
+
+                        return (
+                            f"The Centralized Monitoring System covers **{len(rows)} monitored bank branches / areas**:\n\n"
+                            f"### Monitored Branches & Alert Volumes\n{tbl}\n"
+                            f"*(Note: Live telemetry feeds, camera status, and security flags are reported for all listed branches).* "
+                        ), context
+                except Exception as e:
+                    print(f"[COMPLEX QUERY ERROR] List branches query failed: {e}")
 
         # 0.005 Universal Camera Engine ("how many cameras in jankipuram", "list active cameras in aonla", "list all cameras")
         if any(w in msg_lower for w in ["camera", "cameras", "cctv"]):
@@ -795,23 +874,60 @@ class ChatbotService:
                     except Exception as e:
                         print(f"[COMPLEX QUERY ERROR] List cameras query failed: {e}")
 
-        # 0.01 Universal Parameter Grouping Engine ("show me todays alert and group them by their severity", "group by status", "breakdown by severity", "alerts per branch")
+        # 0.01 Universal Parameter Grouping Engine ("show me todays alert and group them by their severity", "group by status", "breakdown by severity", "show severity breakdown for agra")
         is_group_query = (
-            any(w in msg_lower for w in ["group", "grouped", "grouping", "breakdown", "distribution", "categorize", "split", "wise", "per"])
-            and any(w in msg_lower for w in ["alert", "alerts", "incident", "incidents", "telemetry", "cctv", "camera", "cameras"])
-        ) or any(w in msg_lower for w in ["highest number", "highest alerts", "highest alert", "most alerts", "branch has highest"])
+            (
+                any(w in msg_lower for w in ["group", "grouped", "grouping", "breakdown", "distribution", "categorize", "split", "wise", "per"])
+                and any(w in msg_lower for w in ["alert", "alerts", "incident", "incidents", "telemetry", "cctv", "camera", "cameras", "severity", "priority", "status", "type"])
+            ) or any(w in msg_lower for w in ["highest number", "highest alerts", "highest alert", "most alerts", "branch has highest", "severity breakdown", "status breakdown", "type breakdown", "branch breakdown"])
+        ) and not any(w in msg_lower for w in ["response time", "sla", "delay", "latency", "operator time"])
 
         if is_group_query:
-            # Extract date bounds if present in query
+            # Extract date bounds, location, alert type, severity, and status filters
             d_start_grp, d_end_grp, d_kind_grp = self._extract_dates_from_query(msg_lower)
-            date_where = ""
-            date_params = {}
+            loc_filter_grp = self._extract_location_filter(msg_lower, context)
+            type_filter_grp = self._extract_alert_type_filter(msg_lower)
+
+            where_conds = []
+            where_params = {}
+            labels_grp = []
+
             if d_start_grp and d_end_grp:
-                date_where = "WHERE Datetime >= :dt_start AND Datetime <= :dt_end"
-                date_params = {"dt_start": f"{d_start_grp} 00:00:00", "dt_end": f"{d_end_grp} 23:59:59"}
-                date_label = f" for **{d_start_grp}**" if d_start_grp == d_end_grp else f" for the period **{d_start_grp}** to **{d_end_grp}**"
-            else:
-                date_label = " across the system"
+                where_conds.append("Datetime >= :dt_start AND Datetime <= :dt_end")
+                where_params["dt_start"] = f"{d_start_grp} 00:00:00"
+                where_params["dt_end"] = f"{d_end_grp} 23:59:59"
+                labels_grp.append(f"for **{d_start_grp}**" if d_start_grp == d_end_grp else f"for the period **{d_start_grp}** to **{d_end_grp}**")
+
+            if loc_filter_grp:
+                where_conds.append("(Area LIKE :loc OR Location LIKE :loc OR Zone LIKE :loc)")
+                where_params["loc"] = f"%{loc_filter_grp}%"
+                labels_grp.append(f"in **{loc_filter_grp}**")
+
+            if type_filter_grp:
+                where_conds.append("AlertType = :at_type")
+                where_params["at_type"] = type_filter_grp
+                labels_grp.append(f"for **{type_filter_grp}** alerts")
+
+            if re.search(r'\b(high|critical|severe)\b', msg_lower):
+                where_conds.append("Severity IN ('High', 'Critical')")
+                labels_grp.append("with **High / Critical** severity")
+            elif re.search(r'\b(medium|moderate)\b', msg_lower):
+                where_conds.append("Severity = 'Medium'")
+                labels_grp.append("with **Medium** severity")
+            elif re.search(r'\b(low|minor)\b', msg_lower):
+                where_conds.append("Severity = 'Low'")
+                labels_grp.append("with **Low** severity")
+
+            if any(s in msg_lower for s in ["closed", "completed", "resolved"]):
+                where_conds.append("(Status LIKE '%Closed%' OR Status LIKE '%Completed%')")
+                labels_grp.append("with **Closed** status")
+            elif any(s in msg_lower for s in ["pending", "active", "open"]):
+                where_conds.append("(Status LIKE '%Pending%' OR Status LIKE '%Active%')")
+                labels_grp.append("with **Pending** status")
+
+            date_label = (" " + " ".join(labels_grp)) if labels_grp else ""
+            loc_label = ""
+            where_str = f"WHERE {' AND '.join(where_conds)}" if where_conds else ""
 
             # Determine Grouping Dimension (Severity, Status, Type, Zone, Operator, Branch)
             if any(w in msg_lower for w in ["severity", "priority", "criticality"]):
@@ -826,7 +942,7 @@ class ChatbotService:
             elif any(w in msg_lower for w in ["zone", "lho", "region"]):
                 grp_col = "Zone"
                 grp_label = "Monitoring Zone"
-            elif any(w in msg_lower for w in ["operator", "user", "staff"]):
+            elif any(w in msg_lower for w in ["by operator", "per operator", "operator breakdown", "operator wise"]):
                 grp_col = "Operatorname"
                 grp_label = "Assigned Operator"
             else:
@@ -842,12 +958,12 @@ class ChatbotService:
                             SUM(CASE WHEN Status LIKE '%Pending%' THEN 1 ELSE 0 END) as pending_alerts,
                             SUM(CASE WHEN Status LIKE '%Closed%' THEN 1 ELSE 0 END) as closed_alerts
                         FROM AlertsDetails
-                        {date_where}
+                        {where_str}
                         GROUP BY {grp_col}
                         ORDER BY total_alerts DESC
                     """
                     with self.ds.engine.connect() as conn:
-                        rows = conn.execute(text(q), date_params).mappings().all()
+                        rows = conn.execute(text(q), where_params).mappings().all()
                         tot_all = sum(r['total_alerts'] for r in rows)
                         top_key = rows[0]['group_key'] if rows else "N/A"
                         top_cnt = rows[0]['total_alerts'] if rows else 0
@@ -861,10 +977,10 @@ class ChatbotService:
                             table_rows += f"| **{key_name}** | **{r['total_alerts']:,}** | {r['pending_alerts']:,} | {r['closed_alerts']:,} | {pct}% |\n"
 
                         return (
-                            f"Alert breakdown grouped by **{grp_label}**{date_label} (total **{tot_all:,} alerts** across **{len(rows)} categories**):\n\n"
+                            f"Alert breakdown grouped by **{grp_label}**{loc_label}{date_label} (total **{tot_all:,} alerts** across **{len(rows)} categories**):\n\n"
                             f"### Security Alerts Grouped by {grp_label}\n{table_header}{table_rows}\n"
                             f"### Operations Summary\n"
-                            f"Highest category: **{top_key}** representing **{top_cnt:,} alerts** (`{top_pct}%` share of volume{date_label})."
+                            f"Highest category: **{top_key}** representing **{top_cnt:,} alerts** (`{top_pct}%` share of volume{loc_label}{date_label})."
                         ), context
                 except Exception as e:
                     print(f"[COMPLEX QUERY ERROR] Parameter grouping query failed: {e}")
@@ -930,7 +1046,7 @@ class ChatbotService:
 
         # 0.05 Universal Date Alert Summary Handler ("give me 20th august alerts summary", "give me yesterday alerts summary", "august 24 summary")
         d_start_sum, d_end_sum, d_kind_sum = self._extract_dates_from_query(msg_lower)
-        if d_start_sum and d_end_sum and (any(w in msg_lower for w in ["summary", "overview", "report", "breakdown"]) or "yesterday" in msg_lower or "alerts summary" in msg_lower):
+        if d_start_sum and d_end_sum and not any(w in msg_lower for w in ["response time", "sla", "delay", "latency", "operator time"]) and (any(w in msg_lower for w in ["summary", "overview", "report", "breakdown"]) or "yesterday" in msg_lower or "alerts summary" in msg_lower):
             if self.ds.use_sql_server:
                 try:
                     q_br = """
@@ -983,7 +1099,7 @@ class ChatbotService:
                     print(f"[COMPLEX QUERY ERROR] Universal date summary query failed: {e}")
 
         # 0.5 Status Alert Listing Queries ("show me completed alerts from noida", "at august 20, show me closed alerts from agra")
-        if any(st in msg_lower for st in ["closed", "completed", "resolved", "acknowledged", "ack", "pending", "active", "open"]) and not any(w in msg_lower for w in ["how many", "number of", "count of", "percent", "ratio", "slowest"]):
+        if any(st in msg_lower for st in ["closed", "completed", "resolved", "acknowledged", "ack", "pending", "active", "open"]) and not any(w in msg_lower for w in ["how many", "number of", "count of", "percent", "ratio", "slowest", "response time", "sla", "delay", "latency", "operator time"]):
             if any(w in msg_lower for w in ["completed", "closed", "resolved"]):
                 target_status_sql = "(Status LIKE '%Closed%' OR Status LIKE '%Completed%')"
                 target_status_label = "Closed / Completed"
@@ -1264,13 +1380,17 @@ class ChatbotService:
 
         # 3. Single Severity Branch Query ("how many severe alerts for today", "Show the 5 most recent high-severity alerts in Noida")
         normalized_msg = msg_lower.replace("-", " ")
-        sev_triggers = ["high", "medium", "low", "critical", "severe", "major", "minor", "urgent", "dangerous", "emergency", "criticality", "serious", "moderate"]
-        if any(sev in normalized_msg for sev in sev_triggers) and any(w in normalized_msg for w in ["alert", "alerts", "incident", "incidents", "severity", "priority", "recent", "how many", "count", "total"]) and not any(w in normalized_msg for w in ["operator", "handled", "slowest", "delay", "ratio", "percent"]):
+        has_high = bool(re.search(r'\b(high|critical|severe|major|urgent|dangerous|emergency|criticality|serious)\b', normalized_msg))
+        has_medium = bool(re.search(r'\b(medium|moderate|normal|standard|mid|intermediate)\b', normalized_msg))
+        has_low = bool(re.search(r'\b(low|minor|trivial|light|small|info)\b', normalized_msg))
+        is_latency_or_skip = any(w in normalized_msg for w in ["operator", "handled", "slowest", "delay", "latency", "response", "time", "below", "above", "under", "exceeding", "ratio", "percent"])
+
+        if (has_high or has_medium or has_low) and not is_latency_or_skip and any(w in normalized_msg for w in ["alert", "alerts", "incident", "incidents", "severity", "priority", "recent", "how many", "count", "total"]):
             # Severity Synonym Classifier
-            if any(s in normalized_msg for s in ["high", "critical", "severe", "major", "urgent", "dangerous", "emergency", "criticality", "serious"]):
+            if has_high:
                 target_sev_sql = "Severity IN ('High', 'Critical')"
                 target_sev_label = "High / Critical"
-            elif any(s in normalized_msg for s in ["medium", "moderate", "normal", "standard", "mid", "intermediate"]):
+            elif has_medium:
                 target_sev_sql = "Severity = 'Medium'"
                 target_sev_label = "Medium"
             else:
@@ -1441,26 +1561,142 @@ class ChatbotService:
                     except Exception as e:
                         print(f"[COMPLEX QUERY ERROR] Severity percentage query failed: {e}")
 
-        # 5.5 Response Time for Today / Specific Date Query Handler ("response time for today", "operator response time today")
-        if any(w in msg_lower for w in ["response time", "sla", "delay", "operator time"]):
+        # 5.5 Response Time & Latency Threshold Handler ("show alerts with response time below 30 seconds", "response time for today")
+        if any(w in msg_lower for w in ["response time", "sla", "delay", "operator time", "latency"]):
+            # Check for threshold condition (e.g. "below 30 seconds", "under 1 minute", "above 5 minutes")
+            thresh_match = re.search(r'\b(below|under|less than|shorter than|above|exceeding|more than|longer than)\s+(\d+)\s*(sec|second|seconds|min|mins|minute|minutes|hr|hrs|hour|hours)?\b', msg_lower)
+            if thresh_match:
+                op_word = thresh_match.group(1)
+                val_num = int(thresh_match.group(2))
+                unit = (thresh_match.group(3) or "second").lower()
+                
+                # Convert threshold to seconds
+                if "min" in unit:
+                    thresh_sec = val_num * 60
+                elif "hr" in unit or "hour" in unit:
+                    thresh_sec = val_num * 3600
+                else:
+                    thresh_sec = val_num
+                
+                comp_op = "<" if op_word in ["below", "under", "less than", "shorter than"] else ">"
+                op_label = f"less than {val_num} {unit}" if comp_op == "<" else f"greater than {val_num} {unit}"
+                
+                loc_filter_thresh = self._extract_location_filter(msg_lower, context)
+                where_parts = ["AckTime IS NOT NULL", f"DATEDIFF(second, Datetime, AckTime) {comp_op} :th_sec"]
+                params = {"th_sec": thresh_sec}
+                if loc_filter_thresh:
+                    where_parts.append("(Area LIKE :loc OR Location LIKE :loc)")
+                    params["loc"] = f"%{loc_filter_thresh}%"
+                
+                if self.ds.use_sql_server:
+                    try:
+                        q_cnt = f"""
+                            SELECT COUNT(*) as total_cnt,
+                                   AVG(DATEDIFF(second, Datetime, AckTime)) as avg_sec
+                            FROM AlertsDetails
+                            WHERE {' AND '.join(where_parts)}
+                        """
+                        q_rows = f"""
+                            SELECT TOP 15 AlertID, AlertType, TRIM(COALESCE(Area, Location)) as branch_name, Severity, Datetime, DATEDIFF(second, Datetime, AckTime) as resp_sec, Status
+                            FROM AlertsDetails
+                            WHERE {' AND '.join(where_parts)}
+                            ORDER BY DATEDIFF(second, Datetime, AckTime) ASC
+                        """
+                        with self.ds.engine.connect() as conn:
+                            c_res = conn.execute(text(q_cnt), params).mappings().first()
+                            tot_cnt = c_res.get("total_cnt") or 0
+                            avg_s = c_res.get("avg_sec")
+                            rows = conn.execute(text(q_rows), params).mappings().all()
+                            
+                            loc_str = f" in **{loc_filter_thresh}**" if loc_filter_thresh else ""
+                            avg_str = self.ds.format_seconds_human(avg_s) if avg_s else "N/A"
+                            
+                            if rows:
+                                tbl = "| Alert ID | Type | Branch Name | Severity | Datetime | Response Delay | Status |\n|---|---|---|---|---|---|---|\n"
+                                for r in rows:
+                                    r_str = self.ds.format_seconds_human(r['resp_sec'])
+                                    tbl += f"| {r['AlertID']} | {r['AlertType']} | {r['branch_name']} | **{r['Severity']}** | {r['Datetime']} | **{r_str}** | {r['Status']} |\n"
+                                return (
+                                    f"Found **{tot_cnt:,} security alerts**{loc_str} with response time **{op_label}** (average delay **{avg_str}**):\n\n"
+                                    f"### Telemetry Alerts Matching SLA Threshold ({op_label})\n{tbl}\n"
+                                    f"*(Showing top 15 alerts matching response latency threshold).* "
+                                ), context
+                            else:
+                                return f"No security alerts{loc_str} were found matching response time **{op_label}**.", context
+                    except Exception as e:
+                        print(f"[COMPLEX QUERY ERROR] Response threshold query failed: {e}")
             if self.ds.use_sql_server:
                 try:
                     d_start_rt, d_end_rt, d_kind_rt = self._extract_dates_from_query(msg_lower)
-                    dt_start_str = f"{d_start_rt} 00:00:00" if d_start_rt else datetime.now().strftime("%Y-%m-%d 00:00:00")
-                    dt_end_str = f"{d_end_rt} 23:59:59" if d_end_rt else datetime.now().strftime("%Y-%m-%d 23:59:59")
-                    dt_label = f"**{d_start_rt}**" if (d_start_rt and d_start_rt == d_end_rt) else ("today (**" + datetime.now().strftime("%Y-%m-%d") + "**)" if not d_start_rt else f"the period **{d_start_rt}** to **{d_end_rt}**")
+                    loc_filter_rt = self._extract_location_filter(msg_lower, context)
+                    type_filter_rt = self._extract_alert_type_filter(msg_lower)
 
-                    q = """
+                    where_parts_rt = []
+                    params_rt = {}
+                    desc_labels = []
+
+                    # 1. Dynamic Date Filter
+                    if d_start_rt and d_end_rt:
+                        where_parts_rt.append("Datetime >= :dt_start AND Datetime <= :dt_end")
+                        params_rt["dt_start"] = f"{d_start_rt} 00:00:00"
+                        params_rt["dt_end"] = f"{d_end_rt} 23:59:59"
+                        dt_str = f"for **{d_start_rt}**" if d_start_rt == d_end_rt else f"for **{d_start_rt} to {d_end_rt}**"
+                        desc_labels.append(dt_str)
+                    elif "today" in msg_lower:
+                        today_str = datetime.now().strftime("%Y-%m-%d")
+                        where_parts_rt.append("Datetime >= :dt_start AND Datetime <= :dt_end")
+                        params_rt["dt_start"] = f"{today_str} 00:00:00"
+                        params_rt["dt_end"] = f"{today_str} 23:59:59"
+                        desc_labels.append(f"for today (**{today_str}**)")
+
+                    # 2. Dynamic Branch / Location Filter
+                    if loc_filter_rt:
+                        where_parts_rt.append("(Area LIKE :loc OR Location LIKE :loc)")
+                        params_rt["loc"] = f"%{loc_filter_rt}%"
+                        desc_labels.append(f"in **{loc_filter_rt}**")
+
+                    # 3. Dynamic Alert Type Filter
+                    if type_filter_rt:
+                        where_parts_rt.append("AlertType = :at_type")
+                        params_rt["at_type"] = type_filter_rt
+                        desc_labels.append(f"for **{type_filter_rt}** alerts")
+
+                    # 4. Dynamic Severity Filter
+                    has_high_rt = bool(re.search(r'\b(high|critical|severe)\b', msg_lower))
+                    has_med_rt = bool(re.search(r'\b(medium|moderate)\b', msg_lower))
+                    has_low_rt = bool(re.search(r'\b(low|minor)\b', msg_lower))
+                    if has_high_rt:
+                        where_parts_rt.append("Severity IN ('High', 'Critical')")
+                        desc_labels.append("with **High / Critical** severity")
+                    elif has_med_rt:
+                        where_parts_rt.append("Severity = 'Medium'")
+                        desc_labels.append("with **Medium** severity")
+                    elif has_low_rt:
+                        where_parts_rt.append("Severity = 'Low'")
+                        desc_labels.append("with **Low** severity")
+
+                    # 5. Dynamic Status Filter
+                    if any(s in msg_lower for s in ["closed", "completed", "resolved"]):
+                        where_parts_rt.append("(Status LIKE '%Closed%' OR Status LIKE '%Completed%')")
+                        desc_labels.append("with **Closed** status")
+                    elif any(s in msg_lower for s in ["pending", "active", "open"]):
+                        where_parts_rt.append("(Status LIKE '%Pending%' OR Status LIKE '%Active%')")
+                        desc_labels.append("with **Pending** status")
+
+                    scope_str = (" " + " ".join(desc_labels)) if desc_labels else " across all registered alerts"
+                    where_clause_rt = f"WHERE {' AND '.join(where_parts_rt)}" if where_parts_rt else ""
+
+                    q = f"""
                         SELECT 
                             COUNT(*) as total_alerts,
                             SUM(CASE WHEN AckTime IS NOT NULL THEN 1 ELSE 0 END) as ack_alerts,
                             AVG(CASE WHEN AckTime IS NOT NULL THEN DATEDIFF(second, Datetime, AckTime) ELSE NULL END) as avg_delay_sec,
                             MAX(CASE WHEN AckTime IS NOT NULL THEN DATEDIFF(second, Datetime, AckTime) ELSE NULL END) as max_delay_sec
                         FROM AlertsDetails
-                        WHERE Datetime >= :dt_start AND Datetime <= :dt_end
+                        {where_clause_rt}
                     """
                     with self.ds.engine.connect() as conn:
-                        res = conn.execute(text(q), {"dt_start": dt_start_str, "dt_end": dt_end_str}).mappings().first()
+                        res = conn.execute(text(q), params_rt).mappings().first()
                         tot = res.get("total_alerts") or 0
                         ack = res.get("ack_alerts") or 0
                         avg_s = res.get("avg_delay_sec")
@@ -1471,15 +1707,15 @@ class ChatbotService:
                         pct = round((ack / tot) * 100, 2) if tot > 0 else 0
 
                         return (
-                            f"For {dt_label}, the average operator response time is **{avg_str}** across **{tot:,} registered telemetry alerts** (`{pct}%` evaluated):\n\n"
-                            f"### Operator Response Summary ({dt_label})\n"
+                            f"The average operator response time{scope_str} is **{avg_str}** across **{tot:,} registered telemetry alerts** (`{pct}%` evaluated):\n\n"
+                            f"### Operator Response Summary{scope_str}\n"
                             f"- **Average Response Delay**: `{avg_str}`\n"
                             f"- **Maximum Delay Recorded**: `{max_str}`\n"
                             f"- **Processed Telemetry Volume**: `{ack:,}` of `{tot:,}` alerts (`{pct}%` SLA compliance).\n\n"
                             f"*(Note: Response time measures latency between automated sensor trigger and operator acknowledgment).* "
                         ), context
                 except Exception as e:
-                    print(f"[COMPLEX QUERY ERROR] Response time date query failed: {e}")
+                    print(f"[COMPLEX QUERY ERROR] Response time query failed: {e}")
 
         # 6. Specific Date Queries ("Show all alerts registered on August 12", "July 13", "August 24")
         if d_kind == "single" or (d_start and d_start == d_end):
@@ -1493,38 +1729,64 @@ class ChatbotService:
                 elif "medium" in msg_lower: sev_filter = "Medium"
 
                 try:
+                    loc_filter = self._extract_location_filter(msg_lower, context)
+                    type_filter = self._extract_alert_type_filter(msg_lower)
+
                     where_parts = [
-                        "Datetime >= :dt_start",
-                        "Datetime <= :dt_end"
+                        "Datetime >= :dt_start AND Datetime <= :dt_end"
                     ]
                     params = {
                         "dt_start": f"{target_date} 00:00:00",
                         "dt_end": f"{target_date} 23:59:59"
                     }
+                    labels = [f"on **{target_date}**"]
+
                     if loc_filter:
                         where_parts.append("(Area LIKE :loc OR Location LIKE :loc)")
                         params["loc"] = f"%{loc_filter}%"
-                    if sev_filter:
-                        where_parts.append("Severity = :sev")
-                        params["sev"] = sev_filter
+                        labels.append(f"in **{loc_filter}**")
 
-                    q = f"""
-                        SELECT TOP 15 AlertID, AlertType, TRIM(COALESCE(Area, Location)) as branch_name, Severity, Datetime, Status
-                        FROM AlertsDetails
-                        WHERE {' AND '.join(where_parts)}
-                        ORDER BY Datetime DESC
-                    """
+                    if type_filter:
+                        where_parts.append("AlertType = :at_type")
+                        params["at_type"] = type_filter
+                        labels.append(f"for **{type_filter}** alerts")
+
+                    if re.search(r'\b(high|critical|severe)\b', msg_lower):
+                        where_parts.append("Severity IN ('High', 'Critical')")
+                        labels.append("with **High / Critical** severity")
+                    elif re.search(r'\b(medium|moderate)\b', msg_lower):
+                        where_parts.append("Severity = 'Medium'")
+                        labels.append("with **Medium** severity")
+                    elif re.search(r'\b(low|minor)\b', msg_lower):
+                        where_parts.append("Severity = 'Low'")
+                        labels.append("with **Low** severity")
+
+                    if any(s in msg_lower for s in ["closed", "completed", "resolved"]):
+                        where_parts.append("(Status LIKE '%Closed%' OR Status LIKE '%Completed%')")
+                        labels.append("with **Closed** status")
+                    elif any(s in msg_lower for s in ["pending", "active", "open"]):
+                        where_parts.append("(Status LIKE '%Pending%' OR Status LIKE '%Active%')")
+                        labels.append("with **Pending** status")
+
+                    scope_str = " " + " ".join(labels)
+                    q_cnt = f"SELECT COUNT(*) as total_cnt FROM AlertsDetails WHERE {' AND '.join(where_parts)}"
+                    q_rows = f"SELECT TOP 15 AlertID, AlertType, TRIM(COALESCE(Area, Location)) as branch_name, Severity, Datetime, Status FROM AlertsDetails WHERE {' AND '.join(where_parts)} ORDER BY Datetime DESC"
                     with self.ds.engine.connect() as conn:
-                        rows = conn.execute(text(q), params).mappings().all()
-                        loc_str = f" for **{loc_filter}**" if loc_filter else ""
-                        sev_str = f" ({sev_filter} priority)" if sev_filter else ""
-                        if rows:
+                        c_res = conn.execute(text(q_cnt), params).mappings().first()
+                        tot_cnt = c_res.get("total_cnt") or 0
+                        rows = conn.execute(text(q_rows), params).mappings().all()
+
+                        if tot_cnt > 0:
                             tbl = "| Alert ID | Type | Branch Name | Severity | Datetime | Status |\n|---|---|---|---|---|---|\n"
                             for r in rows:
                                 tbl += f"| {r['AlertID']} | {r['AlertType']} | {r['branch_name']} | **{r['Severity']}** | {r['Datetime']} | {r['Status']} |\n"
-                            return f"Retrieved **{len(rows)} security alerts** registered on **{target_date}**{loc_str}{sev_str}:\n\n{tbl}\n### Operations Summary\nDisplaying matching telemetry alerts registered on {target_date}.", context
+                            return (
+                                f"A total of **{tot_cnt:,} security alerts** were registered{scope_str}:\n\n"
+                                f"### Registered Telemetry Alerts ({target_date})\n{tbl}\n"
+                                f"*(Note: Displaying top {len(rows)} sample alerts out of {tot_cnt:,} total alerts).* "
+                            ), context
                         else:
-                            return f"No alerts were found registered on **{target_date}**{loc_str}{sev_str}. All operational parameters were normal.", context
+                            return f"No security alerts were registered{scope_str}. All operational parameters were normal.", context
                 except Exception as e:
                     print(f"[COMPLEX QUERY ERROR] Specific date query failed: {e}")
 
@@ -3115,17 +3377,9 @@ class ChatbotService:
         CLOSE_RACE_MARGIN_THRESHOLD = 0.05
 
         if len(sorted_indep_scores) >= 2 and margin < CLOSE_RACE_MARGIN_THRESHOLD:
-
-            cand_str = f"- Table **{best_table}** (score: `{top_score:.3f}`)\n- Table **{second_table}** (score: `{second_score:.3f}`)"
-
             msg = (
-
-                f"Your query matches multiple candidate database tables with nearly equal confidence (margin score difference: `{margin:.3f}`):\n\n"
-
-                f"{cand_str}\n\n"
-
-                "Please clarify which table or entity type you meant to query."
-
+                "Your request touches multiple operational data areas (such as monitored LHO circles, asset management, or alert telemetry).\n\n"
+                "Please clarify if you are asking about LHO command circles, device assets, or security alert metrics."
             )
 
             self._log_abstention(query_text, best_table=best_table, top_score=top_score, second_score=second_score, margin=margin, reason="AMBIGUOUS_TABLE_RACE")

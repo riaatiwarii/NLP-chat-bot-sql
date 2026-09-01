@@ -1271,3 +1271,17 @@ class DataService:
             res = [a for a in res if location.lower() in a.get("branch_name", "").lower() or location.lower() in a.get("lho_name", "").lower()]
         return res
 
+    def get_all_alert_types(self) -> list:
+        """Introspects and returns all distinct AlertType values live from SQL Server."""
+        if not self.use_sql_server or not self.engine:
+            return ["Analytics", "VMS", "SAS", "VideoAnalytics"]
+        try:
+            with self.engine.connect() as conn:
+                q = text("SELECT DISTINCT AlertType FROM AlertsDetails WHERE AlertType IS NOT NULL AND TRIM(AlertType) != ''")
+                rows = conn.execute(q).fetchall()
+                types = [r[0].strip() for r in rows if r[0] and str(r[0]).strip()]
+                return types if types else ["Analytics", "VMS", "SAS", "VideoAnalytics"]
+        except Exception as e:
+            print(f"[DATA SERVICE ERROR] Failed to fetch alert types: {e}")
+            return ["Analytics", "VMS", "SAS", "VideoAnalytics"]
+
