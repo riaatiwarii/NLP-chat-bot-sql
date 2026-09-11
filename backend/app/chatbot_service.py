@@ -642,15 +642,23 @@ class ChatbotService:
                 "high", "medium", "low", "critical", "severe", "major", "minor", "urgent", "emergency", "priority", "severity",
                 "closed", "pending", "active", "completed", "resolved", "acknowledged", "status", "database",
                 "response", "time", "delay", "latency", "sla", "operator", "handled", "workload", "incident", "incidents",
-                "breakdown", "distribution", "category", "type", "event", "zone", "lho", "branch", "location", "area",
+                "breakdown", "distribution", "category", "type", "event", "zone", "lho", "branch", "location", "area", "branches", "locations",
                 "month", "week", "year", "date", "number", "count", "percent", "ratio", "share", "severity alert",
                 "high severity", "medium severity", "low severity", "high severity alert", "medium severity alert",
                 "january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december",
-                "jan", "feb", "mar", "apr", "jun", "jul", "aug", "sep", "oct", "nov", "dec"
+                "jan", "feb", "mar", "apr", "jun", "jul", "aug", "sep", "oct", "nov", "dec",
+                "vms", "sas", "analytics", "videoanalytics", "va", "we", "have", "and", "where", "what", "how", "which", "why", "who", "is", "are", "were", "was"
             ]
             cand_words = candidate.split()
             # Discard if candidate contains any stop word or if candidate is not a valid location
             if not any(sw in candidate for sw in stop_words) and len(candidate) >= 3 and not re.match(r'^\d+\s*$', candidate):
+                # Verify candidate against real database locations if available
+                if hasattr(self, "ds") and self.ds:
+                    db_locs = [l.lower() for l in self.ds.get_all_locations()]
+                    if any(c_w in db_l for db_l in db_locs for c_w in cand_words if len(c_w) >= 3):
+                        return candidate.title()
+                    else:
+                        return None
                 return candidate.title()
 
         return None
@@ -748,7 +756,7 @@ class ChatbotService:
                     print(f"[COMPLEX QUERY ERROR] List LHOs query failed: {e}")
 
         # 0.003 Monitored Branches Listing Handler ("list the branches", "list branches", "show branches", "all branches", "monitored branches")
-        if (any(w in msg_lower for w in ["branch", "branches", "locations", "sites"]) and any(w in msg_lower for w in ["list", "show", "get", "all", "monitored", "configured"])) or msg_lower in ["branches", "list branches", "list the branches", "all branches"]:
+        if ((any(w in msg_lower for w in ["branch", "branches", "locations", "sites"]) and any(w in msg_lower for w in ["list", "show", "get", "all", "monitored", "configured"])) or msg_lower in ["branches", "list branches", "list the branches", "all branches"]) and not (has_type or "alert" in msg_lower or "alerts" in msg_lower):
             if self.ds.use_sql_server:
                 try:
                     q = """
@@ -874,12 +882,12 @@ class ChatbotService:
                     except Exception as e:
                         print(f"[COMPLEX QUERY ERROR] List cameras query failed: {e}")
 
-        # 0.01 Universal Parameter Grouping Engine ("show me todays alert and group them by their severity", "group by status", "breakdown by severity", "show severity breakdown for agra")
+        # 0.01 Universal Parameter Grouping Engine ("show me todays alert and group them by their severity", "group by status", "breakdown by severity", "show severity breakdown for agra", "show me alerts by the type")
         is_group_query = (
             (
                 any(w in msg_lower for w in ["group", "grouped", "grouping", "breakdown", "distribution", "categorize", "split", "wise", "per"])
-                and any(w in msg_lower for w in ["alert", "alerts", "incident", "incidents", "telemetry", "cctv", "camera", "cameras", "severity", "priority", "status", "type"])
-            ) or any(w in msg_lower for w in ["highest number", "highest alerts", "highest alert", "most alerts", "branch has highest", "severity breakdown", "status breakdown", "type breakdown", "branch breakdown"])
+                and any(w in msg_lower for w in ["alert", "alerts", "incident", "incidents", "telemetry", "cctv", "camera", "cameras", "severity", "priority", "status", "type", "branch", "branches"])
+            ) or any(w in msg_lower for w in ["highest number", "highest alerts", "highest alert", "most alerts", "branch has highest", "severity breakdown", "status breakdown", "type breakdown", "branch breakdown", "alerts by type", "alerts by the type", "alerts by severity", "alerts by status", "alerts by branch", "alerts by branches", "by branch", "by branches"])
         ) and not any(w in msg_lower for w in ["response time", "sla", "delay", "latency", "operator time"])
 
         if is_group_query:
@@ -2453,7 +2461,7 @@ class ChatbotService:
 
         # Now directly counting distinct Areas from AlertsDetails which has the real branch data
 
-        elif ("branch" in msg or "branches" in msg or "lho" in msg or "circle" in msg) and (any(w in msg for w in ["how many", "count", "total", "number of", "show", "list", "all", "what are"]) or msg in ["branches", "show me the branches", "show branches", "list branches", "all branches"]):
+        elif ("branch" in msg or "branches" in msg or "lho" in msg or "circle" in msg) and (any(w in msg for w in ["how many", "count", "total", "number of", "show", "list", "all", "what are"]) or msg in ["branches", "show me the branches", "show branches", "list branches", "all branches"]) and not any(w in msg for w in ["alert", "alerts", "vms", "sas", "analytics", "camera", "cameras", "incident", "incidents"]):
 
 
             intent = "BRANCH_COUNT"
@@ -2544,26 +2552,10 @@ class ChatbotService:
 
 
 
-        # 31. Alerts by specific Type and Location (e.g. "how many alerts of VMS we have and where")
-
-        elif is_semantic("ALERTS_BY_TYPE") or (re.search(r'\b(vms|sas|analytics|videoanalytics)\b', msg) and any(w in msg for w in ["how many", "count", "where", "distribution"]) and not any(w in msg for w in ["recent", "latest", "time", "order"])):
-
+        # 31. Alerts by specific Type and Location (e.g. "how many alerts of VMS we have and where", "how many alerts of Analytics we have and where")
+        elif is_semantic("ALERTS_BY_TYPE") or (bool(self._extract_alert_type_filter(msg.lower())) and any(w in msg.lower() for w in ["how many", "count", "where", "distribution", "branch", "branches"]) and not any(w in msg.lower() for w in ["recent", "latest", "time", "order"])):
             intent = "ALERTS_BY_TYPE"
-
-            type_match = re.search(r'\b(vms|sas|analytics|videoanalytics)\b', msg)
-
-            target_type = type_match.group(1).strip().upper() if type_match else "VMS"
-
-            if target_type == "ANALYTICS":
-
-                target_type = "Analytics"
-
-            elif target_type == "VIDEOANALYTICS":
-
-                target_type = "VideoAnalytics"
-
-                
-
+            target_type = self._extract_alert_type_filter(msg.lower()) or "VMS"
             data_payload["alert_type"] = target_type
 
             
@@ -2572,17 +2564,24 @@ class ChatbotService:
 
                 try:
 
-                    query = """
+                    loc_filter_at = self._extract_location_filter(msg.lower(), context)
+                    where_parts_at = ["AlertType LIKE :alt_type"]
+                    params_at = {"alt_type": f"%{target_type}%"}
+                    if loc_filter_at:
+                        where_parts_at.append("(Area LIKE :loc OR Location LIKE :loc)")
+                        params_at["loc"] = f"%{loc_filter_at}%"
+
+                    query = f"""
                         SELECT 
                             TRIM(COALESCE(Area, Location)) as branch_name, 
                             COUNT(*) as alert_count 
                         FROM AlertsDetails 
-                        WHERE AlertType LIKE :alt_type
+                        WHERE {' AND '.join(where_parts_at)}
                         GROUP BY TRIM(COALESCE(Area, Location))
                         ORDER BY alert_count DESC
                     """
                     with self.ds.engine.connect() as conn:
-                        res = conn.execute(text(query), {"alt_type": f"%{target_type}%"})
+                        res = conn.execute(text(query), params_at)
                         data_payload["branches"] = [dict(r) for r in res.mappings()]
 
                 except Exception as e:
@@ -2613,9 +2612,9 @@ class ChatbotService:
 
 
 
-        # 30. Distinct Alert Types (e.g. "how many alert types we have")
+        # 30. Distinct Alert Types (e.g. "how many alert types we have", "what alert types exist")
 
-        elif is_semantic("ALERT_TYPES") or any(k in msg for k in ["alert type", "types of alert", "different alerts", "kinds of alert", "types of alerts"]):
+        elif (is_semantic("ALERT_TYPES") or any(k in msg for k in ["alert type", "types of alert", "different alerts", "kinds of alert", "types of alerts"])) and not any(w in msg for w in ["show me alerts", "show alerts", "alerts by", "by the type", "by type", "by severity", "by status"]):
 
             intent = "ALERT_TYPES"
 

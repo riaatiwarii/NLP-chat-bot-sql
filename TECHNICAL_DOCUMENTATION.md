@@ -170,3 +170,25 @@ Register-ScheduledTask `
     -Settings (New-ScheduledTaskSettingsSet -StartWhenAvailable -RestartCount 3) `
     -Force
 ```
+
+---
+
+## 8. Standalone PyInstaller Compilation & Service Launcher Mechanics
+
+* **Source Files**: [`SbiCmsGateway.spec`](file:///d:/NLP-chat-bot-sql/SbiCmsGateway.spec), [`build_exe.bat`](file:///d:/NLP-chat-bot-sql/build_exe.bat), [`start_server.bat`](file:///d:/NLP-chat-bot-sql/start_server.bat), [`launcher.py`](file:///d:/NLP-chat-bot-sql/launcher.py)
+
+### 8.1 Frozen Asset Resolution
+In frozen executable bundles (`sys.frozen = True`), PyInstaller extracts data files into a temporary directory `sys._MEIPASS`. The backend resolves asset paths dynamically:
+
+```python
+if getattr(sys, 'frozen', False):
+    bundle_dir = getattr(sys, '_MEIPASS', os.path.dirname(sys.executable))
+    possible_plugin_dirs.insert(0, os.path.join(bundle_dir, "backend", "plugin_assets"))
+    possible_plugin_dirs.insert(0, os.path.join(bundle_dir, "plugin_assets"))
+```
+
+### 8.2 Firewall Rule Automation (`start_server.bat`)
+```cmd
+netsh advfirewall firewall add rule name="SBI_CMS_Gateway_8001" dir=in action=allow protocol=TCP localport=8001
+```
+This enables zero-configuration client connectivity across local subnet branches.

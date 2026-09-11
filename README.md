@@ -125,9 +125,35 @@ Any existing website, internal dashboard, or intranet portal can embed the AI Ch
 | `data-auto-open` | `true` \| `false` | `false` | Automatically opens modal on page load |
 | `data-api-key` | Token string | `""` | Optional Bearer authorization token |
 
+### Plugin Host Endpoints & Options
+
+* **Standard Plugin Script (`/plugin/widget.js`)**: Direct `<script>` embed tag for web portals.
+* **Transparent iFrame Host (`/plugin/widget_only.html`)**: Transparent HTML host page for CSP-restricted iFrames (shows ONLY the chatbot icon/modal without background portal cards).
+* **Demo Portal Page (`/plugin/demo.html`)**: Complete interactive portal integration example.
+
 ---
 
-## 🖥️ 24/7 Windows Server Deployment (No Docker / No Cloud)
+## 📦 Standalone Executable Packaging & Windows Server Launch (`SbiCmsGateway.exe`)
+
+To build and run the central gateway as a 100% portable, standalone Windows application **without requiring Python, PyTorch, or dependencies installed on the server**:
+
+### 1. Build Executable Package
+Run the automated builder script:
+```cmd
+d:\NLP-chat-bot-sql\build_exe.bat
+```
+This compiles all backend modules, ML models, and plugin assets into `dist\SbiCmsGateway\SbiCmsGateway.exe`.
+
+### 2. Run Server Service
+Double-click `start_server.bat` or run:
+```cmd
+d:\NLP-chat-bot-sql\start_server.bat
+```
+This automatically opens **Port 8001** in Windows Defender Firewall and starts `SbiCmsGateway.exe`.
+
+---
+
+## 🖥️ 24/7 Unattended Windows Service Deployment
 
 To run the gateway continuously on an On-Premise Windows Server (unattended boot without requiring user login):
 
