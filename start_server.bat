@@ -27,10 +27,17 @@ echo  ^</script^^>
 echo ====================================================================
 echo.
 
-if exist "dist\SbiCmsGateway\SbiCmsGateway.exe" (
-    "dist\SbiCmsGateway\SbiCmsGateway.exe"
-) else (
-    echo [ERROR] Executable dist\SbiCmsGateway\SbiCmsGateway.exe not found!
-    echo Please run build_exe.bat first to compile the package.
-    pause
-)
+if not exist "dist\SbiCmsGateway\SbiCmsGateway.exe" goto NOT_FOUND
+
+call "dist\SbiCmsGateway\SbiCmsGateway.exe"
+goto END
+
+:NOT_FOUND
+echo [ERROR] Executable dist\SbiCmsGateway\SbiCmsGateway.exe not found!
+echo Please run build_exe.bat first to compile the package.
+
+:END
+echo.
+echo ====================================================================
+echo Server execution ended.
+pause
