@@ -8,11 +8,17 @@ load_dotenv(dotenv_path=env_path)
 
 class Config:
     # Service & Network Configurations
-    OLLAMA_HOST: str = os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434").rstrip("/")
+    PORT: int = int(os.getenv("PORT", "8001"))
+    
+    # Sanitize OLLAMA_HOST to guarantee valid http:// URL and client-reachable IP
+    _raw_host: str = os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434").strip().rstrip("/")
+    if not _raw_host.startswith("http://") and not _raw_host.startswith("https://"):
+        _raw_host = "http://" + _raw_host
+    OLLAMA_HOST: str = _raw_host.replace("0.0.0.0", "127.0.0.1")
     OLLAMA_MODEL: str = os.getenv("OLLAMA_MODEL", "qwen2.5-coder:7b")
     OLLAMA_RESPONSE_MODEL: str = os.getenv("OLLAMA_RESPONSE_MODEL", "qwen2.5-coder:7b")
-    OLLAMA_TIMEOUT: tuple = (5.0, 120.0)
-    
+    OLLAMA_TIMEOUT: tuple = (10.0, 300.0)
+
     # Database Configuration (SQLAlchemy Connection String)
     DB_CONNECTION_STRING: str = os.getenv(
         "DB_CONNECTION_STRING",
@@ -74,6 +80,12 @@ class Config:
 
     # Stage 5: Intent Keyword Vocab Map
     INTENT_VOCAB_MAP = {
+        "count of total alerts": "SUMMARY",
+        "total alert summary": "SUMMARY",
+        "count of alerts": "SUMMARY",
+        "total alerts": "SUMMARY",
+        "summary of alerts": "SUMMARY",
+        "alert summary": "SUMMARY",
         "count": "COUNT",
         "cnt": "COUNT",
         "kount": "COUNT",

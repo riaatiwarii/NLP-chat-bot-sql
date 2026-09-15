@@ -45,14 +45,17 @@ class PlanGenerator:
                 raw_json = resp.json().get("response", "")
                 parsed = json.loads(raw_json)
                 if isinstance(parsed, dict) and "tables_needed" in parsed:
-                    return parsed
+                    # Enforce ALLOWED_TABLES on LLM plan output
+                    parsed["tables_needed"] = [t for t in parsed.get("tables_needed", []) if t in config.ALLOWED_TABLES] or ["AlertsDetails"]
+                    return parsed, False
         except Exception as e:
             print(f"[PLAN GENERATOR WARNING] Ollama call offline/failed ({e}). Using deterministic plan builder.", flush=True)
 
         # Fallback Deterministic Plan Builder
-        return self._deterministic_plan_builder(
+        plan = self._deterministic_plan_builder(
             normalized_query, resolved_entities, resolved_intent, schema_subset, prior_plan, is_followup
         )
+        return plan, True
 
     def _build_prompt(
         self, query: str, entities: list, intent: str, schema: dict, prior_plan: dict, is_followup: bool, err: str
@@ -63,7 +66,7 @@ class PlanGenerator:
             f"User Query: {query}\n",
             f"Resolved Intent: {intent}\n",
             f"Resolved Entities: {json.dumps(entities)}\n",
-            f"Relevant Schema: {json.dumps(schema.get('tables', {}))}\n"
+            f"Relevant Schema (Allowed tables ONLY): {json.dumps({k: v for k, v in schema.get('tables', {}).items() if k in config.ALLOWED_TABLES})}\n"
         ]
         if is_followup and prior_plan:
             prompt_parts.append(f"Prior Plan to update/diff against: {json.dumps(prior_plan)}\n")
@@ -76,13 +79,18 @@ class PlanGenerator:
     def _deterministic_plan_builder(
         self, query: str, entities: list, intent: str, schema: dict, prior_plan: dict, is_followup: bool
     ) -> dict:
-        tables = list(schema.get("tables", {}).keys())
+        allowed_set = set(config.ALLOWED_TABLES)
+        raw_tables = list(schema.get("tables", {}).keys())
+        tables = [t for t in raw_tables if t in allowed_set]
+        if not tables:
+            tables = [t for t in ["AlertsDetails", "AlertHistory", "AlertSubtype"] if t in allowed_set]
+
         query_lower = query.lower()
 
         # Prioritize primary alert/telemetry tables for dashboard/summary/detail queries
         primary_table = None
         if any(w in query_lower for w in ["summary", "dashboard", "alert", "telemetry"]):
-            for pref in ["AlertsDetails", "Alerts", "Incident_Data", "AlertHistory"]:
+            for pref in ["AlertsDetails", "AlertHistory", "AlertSubtype"]:
                 if pref in tables:
                     primary_table = pref
                     break
@@ -99,31 +107,38 @@ class PlanGenerator:
         if not select_columns:
             select_columns = [c for c in table_cols if c in config.DEFAULT_DISPLAY_COLUMNS] or table_cols[:5]
 
+        def resolve_valid_col(raw_col, valid_cols):
+            v_lowers = [c.lower() for c in valid_cols]
+            r_low = raw_col.lower()
+            if r_low in v_lowers:
+                return valid_cols[v_lowers.index(r_low)]
+            syns = {
+                "priority": ["severity", "status"],
+                "junction": ["area", "zone", "location"],
+                "sensorsubtype": ["alertsubtype", "alerttype", "source"],
+                "cameratype": ["alerttype", "source"]
+            }
+            if r_low in syns:
+                for alt in syns[r_low]:
+                    if alt in v_lowers:
+                        return valid_cols[v_lowers.index(alt)]
+            return None
+
         filters = []
         filtered_cols = set()
         for e in entities:
             if e.get("type") in ["date_relative", "date_explicit"]:
                 continue
             if e.get("is_resolved") and e.get("matched_column"):
-                col = e["matched_column"]
-                # Verify col exists in primary_table, otherwise find table containing col
-                if col.lower() not in [c.lower() for c in table_cols]:
-                    for alt_tbl in tables:
-                        alt_cols = [c["name"].lower() if isinstance(c, dict) else str(c).lower() for c in schema.get("tables", {}).get(alt_tbl, [])]
-                        if col.lower() in alt_cols:
-                            primary_table = alt_tbl
-                            table_cols_info = schema.get("tables", {}).get(primary_table, [])
-                            table_cols = [c["name"] if isinstance(c, dict) else str(c) for c in table_cols_info]
-                            select_columns = [c for c in table_cols if c.lower() not in internal_set]
-                            break
-
-                filters.append({
-                    "table": primary_table,
-                    "column": col,
-                    "operator": "=",
-                    "value": e["resolved_value"]
-                })
-                filtered_cols.add(col.lower())
+                valid_c = resolve_valid_col(e["matched_column"], table_cols)
+                if valid_c:
+                    filters.append({
+                        "table": primary_table,
+                        "column": valid_c,
+                        "operator": "=",
+                        "value": e["resolved_value"]
+                    })
+                    filtered_cols.add(valid_c.lower())
 
         # Timezone-aware Date Filter Resolution
         date_col = None
@@ -189,12 +204,18 @@ class PlanGenerator:
             aggregation = "COUNT"
             order_by = "TotalAlerts DESC"
             limit = 1 if "which" in query_lower or "highest" in query_lower or "top 1" in query_lower else 5
-            for c in table_cols:
-                if c.lower() in ["zone", "area", "location", "branch"]:
-                    group_by = [c]
+            for cand in ["zone", "area", "branch"]:
+                for c in table_cols:
+                    if c.lower() == cand:
+                        group_by = [c]
+                        break
+                if group_by:
                     break
             if not group_by:
-                group_by = [table_cols[0]]
+                for c in table_cols:
+                    if c.lower() not in internal_set and c.lower() not in ["nearestcamera", "alertid", "id"]:
+                        group_by = [c]
+                        break
 
         elif intent in ["SUMMARY", "GROUP_BY"] or any(k in query_lower for k in ["summary", "dashboard", "breakdown"]):
             intent = "SUMMARY"
@@ -210,9 +231,13 @@ class PlanGenerator:
                 if sev_cols:
                     group_by = sev_cols
             elif any(k in query_lower for k in ["location", "branch", "area", "zone"]):
-                loc_cols = [c for c in table_cols if c.lower() in ["location", "zone", "area", "branch"]]
-                if loc_cols and loc_cols[0].lower() not in filtered_cols:
-                    group_by = [loc_cols[0]]
+                for cand in ["zone", "area", "branch"]:
+                    for c in table_cols:
+                        if c.lower() == cand and c.lower() not in filtered_cols:
+                            group_by = [c]
+                            break
+                    if group_by:
+                        break
 
             if not group_by:
                 candidate_dims = []

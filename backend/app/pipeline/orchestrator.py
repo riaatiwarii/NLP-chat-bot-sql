@@ -124,28 +124,40 @@ class PipelineOrchestrator:
         schema_subset = self.schema_graph.get_relevant_schema_subset(normalized_query)
 
         # STAGE 7 & 8: Structured Query Plan Generation & Validation Loop
-        plan = self.plan_generator.generate_plan(
+        plan_res = self.plan_generator.generate_plan(
             normalized_query, resolved_entities, resolved_intent, schema_subset,
             prior_plan=prior_plan if is_followup else None,
             is_followup=is_followup
         )
+        if isinstance(plan_res, tuple):
+            plan, plan_fallback = plan_res
+        else:
+            plan, plan_fallback = plan_res, False
 
         plan_valid, plan_err = self.plan_validator.validate(plan)
         if not plan_valid:
             # Stage 8 Retry (max 1 retry with error appended to prompt)
-            plan = self.plan_generator.generate_plan(
+            plan_res = self.plan_generator.generate_plan(
                 normalized_query, resolved_entities, resolved_intent, schema_subset,
                 prior_plan=prior_plan if is_followup else None,
                 is_followup=is_followup,
                 validation_error=plan_err
             )
+            if isinstance(plan_res, tuple):
+                plan, fb2 = plan_res
+                plan_fallback = plan_fallback or fb2
+            else:
+                plan = plan_res
+
             plan_valid, plan_err = self.plan_validator.validate(plan)
 
         # STAGE 9, 10, 11: SQL Generation, Validation, & Self-Correction Retry Loop
-        sql_query, sql_valid, sql_err, attempts_count = self.self_correction_loop.execute_with_retry(
+        sql_query, sql_valid, sql_err, attempts_count, sql_fallback = self.self_correction_loop.execute_with_retry(
             validated_plan=plan,
             schema_subset=schema_subset
         )
+
+        used_fallback = plan_fallback or sql_fallback
 
         # STAGE 12: Confidence Scoring & Abstention Check
         confidence_score, should_abstain, clarification_msg = self.confidence_scorer.calculate_confidence(
@@ -164,6 +176,7 @@ class PipelineOrchestrator:
                 "plan": plan,
                 "confidence_score": confidence_score,
                 "is_abstention": True,
+                "used_fallback": used_fallback,
                 "session_id": sid
             }
 
@@ -171,7 +184,12 @@ class PipelineOrchestrator:
         rows, column_names, total_count, exec_err = self.executor.execute(sql_query)
         if exec_err and attempts_count < config.MAX_SELF_CORRECTION_ATTEMPTS:
             # Try 1 more execution error self-repair retry
-            sql_query = self.sql_generator.generate_sql(plan, schema_subset, retry_error=exec_err)
+            gen_res = self.sql_generator.generate_sql(plan, schema_subset, retry_error=exec_err)
+            if isinstance(gen_res, tuple):
+                sql_query, fb3 = gen_res
+                used_fallback = used_fallback or fb3
+            else:
+                sql_query = gen_res
             rows, column_names, total_count, exec_err = self.executor.execute(sql_query)
 
         # STAGE 14: Natural Language Response Synthesis
@@ -191,6 +209,7 @@ class PipelineOrchestrator:
             "plan": plan,
             "confidence_score": confidence_score,
             "is_abstention": False,
+            "used_fallback": used_fallback,
             "session_id": sid,
             "rows_count": len(rows)
         }

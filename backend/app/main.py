@@ -83,6 +83,7 @@ class ChatResponse(BaseModel):
     session_id: str
     confidence_score: float
     is_abstention: bool
+    used_fallback: bool = False
     sql: Optional[str] = None
     plan: Optional[Dict[str, Any]] = None
     context: Dict[str, Any] = {}
@@ -113,6 +114,7 @@ def chat_endpoint(request: ChatRequest):
             session_id=res["session_id"],
             confidence_score=res["confidence_score"],
             is_abstention=res["is_abstention"],
+            used_fallback=res.get("used_fallback", False),
             sql=res["sql"],
             plan=res["plan"],
             context=request.context or {}

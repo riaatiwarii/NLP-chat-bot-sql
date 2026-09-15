@@ -35,19 +35,7 @@ if __name__ == "__main__":
         from app.main import app
         
         import socket
-        def get_working_port(default_port=8001):
-            if "PORT" in os.environ:
-                return int(os.environ["PORT"])
-            for p in [default_port, 8000, 8002, 8003, 8004]:
-                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                    try:
-                        s.bind(('0.0.0.0', p))
-                        return p
-                    except OSError:
-                        continue
-            return default_port
-
-        port = get_working_port(8001)
+        port = int(os.getenv("PORT", "8001"))
         print(f"Starting server on http://0.0.0.0:{port} ...", flush=True)
         uvicorn.run(app, host="0.0.0.0", port=port)
     except KeyboardInterrupt:

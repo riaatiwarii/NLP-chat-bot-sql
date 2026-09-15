@@ -33,12 +33,13 @@ class SQLGenerator:
                 raw_text = resp.json().get("response", "")
                 sql = self._extract_sql(raw_text)
                 if sql:
-                    return sql
+                    return sql, False
         except Exception as e:
             print(f"[SQL GENERATOR WARNING] Ollama call offline/failed ({e}). Using deterministic SQL synthesis.", flush=True)
 
         # Fallback Deterministic SQL Builder from JSON Plan
-        return self._deterministic_sql_builder(validated_plan, schema_subset)
+        sql = self._deterministic_sql_builder(validated_plan, schema_subset)
+        return sql, True
 
     def _build_prompt(self, plan: dict, schema: dict, retry_error: str) -> str:
         prompt_parts = [
@@ -83,12 +84,12 @@ class SQLGenerator:
 
         if intent in ["SUMMARY", "GROUP_BY"] or group_by:
             if group_by:
-                gb_cols = [f"{primary_table}.[{g}]" for g in group_by]
-                select_clause = f"{', '.join(gb_cols)}, COUNT(*) AS TotalAlerts"
+                gb_select = [f"RTRIM(LTRIM({primary_table}.[{g}])) AS [{g}]" for g in group_by]
+                select_clause = f"{', '.join(gb_select)}, COUNT(*) AS TotalAlerts"
             else:
                 select_clause = f"COUNT(*) AS TotalAlerts"
         elif intent == "COUNT":
-            select_clause = "COUNT(*)"
+            select_clause = "COUNT(*) AS TotalAlerts"
         elif intent in ["AVG", "SUM", "MAX", "MIN"]:
             target_col = None
             for c in table_cols:
@@ -113,9 +114,9 @@ class SQLGenerator:
 
         if distinct:
             if select_cols:
-                select_clause = ", ".join([f"{primary_table}.[{c}]" for c in select_cols])
+                select_clause = ", ".join([f"RTRIM(LTRIM({primary_table}.[{c}])) AS [{c}]" for c in select_cols])
             else:
-                select_clause = f"{primary_table}.[Zone]"
+                select_clause = f"RTRIM(LTRIM({primary_table}.[Zone])) AS [Zone]"
 
         sql = f"SELECT {distinct_clause}{top_clause}{select_clause} FROM {primary_table}"
 
@@ -154,7 +155,7 @@ class SQLGenerator:
                 op = f.get("operator", "=")
                 val = f.get("value")
                 is_date_cast = f.get("is_date_cast", False)
-                tbl = f.get("table", primary_table)
+                tbl = primary_table # Force primary_table unless multi-table join is present
 
                 if col and val is not None and str(val).strip() != "":
                     col_ref = f"{tbl}.[{col}]"
@@ -173,8 +174,8 @@ class SQLGenerator:
             sql += " WHERE " + " AND ".join(where_parts)
 
         if group_by:
-            gb_cols = [f"{primary_table}.[{g}]" for g in group_by]
-            sql += f" GROUP BY {', '.join(gb_cols)}"
+            gb_exprs = [f"RTRIM(LTRIM({primary_table}.[{g}]))" for g in group_by]
+            sql += f" GROUP BY {', '.join(gb_exprs)}"
 
         if order_by:
             if "TotalAlerts" in order_by or "COUNT" in order_by:

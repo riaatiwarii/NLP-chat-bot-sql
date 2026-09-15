@@ -76,13 +76,15 @@ class Extractor:
         distinct_matches = re.findall(r'\b(lho|lhos|branch|branches|zone|zones|jurisdiction|jurisdictions)\b', text, re.IGNORECASE)
         for dmatch in distinct_matches:
             intent_spans.append({"span": dmatch, "type": "distinct_target"})
+            if dmatch.lower() in ["lho", "lhos"]:
+                entity_spans.append({"span": dmatch, "type": "candidate_entity"})
 
         # Fallback: if no location span was picked up, check capitalized proper nouns (len > 1)
         skip_words = {
             "show", "list", "count", "how", "what", "which", "tell", "me", "about",
             "recent", "latest", "newest", "highest", "top", "max", "min", "all",
             "alert", "alerts", "details", "data", "log", "logs", "record", "records",
-            "more", "some", "any", "branch", "branches", "lho", "lhos", "zone", "zones",
+            "more", "some", "any", "branch", "branches", "zone", "zones",
             "area", "areas", "location", "locations", "has", "the", "in", "for", "with", "of", "is", "are"
         }
         if not any(e["type"] == "location" for e in entity_spans):

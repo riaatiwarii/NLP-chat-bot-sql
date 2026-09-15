@@ -20,7 +20,14 @@ class IntentResolver:
 
         import re
 
-        # 0. Check distinct listing intent
+        # 0. Check summary / aggregate count phrase synonyms
+        if any(p in query_lower for p in [
+            "total alert summary", "count of total alerts", "count of alerts",
+            "total alerts", "summary of alerts", "alert summary", "total alert count"
+        ]):
+            return "SUMMARY"
+
+        # Check distinct listing intent
         if re.search(r'\b(?:list\s+the\s+|list\s+)?(?:lho|lhos|branch|branches|zone|zones|jurisdiction|jurisdictions)\b', query_lower):
             if not any(k in query_lower for k in ["alert", "alerts", "count", "how many"]):
                 return "SELECT_DISTINCT"
