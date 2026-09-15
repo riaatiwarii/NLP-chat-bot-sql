@@ -297,6 +297,19 @@ class DataService:
         return None
 
     # ==================================================
+    def get_all_locations(self):
+        if self.use_sql_server and self.engine:
+            try:
+                with self.engine.connect() as conn:
+                    # Primary source of truth for branches: AlertsDetails.Area
+                    rows = conn.execute(text("SELECT DISTINCT Area FROM AlertsDetails WHERE Area IS NOT NULL AND Area != ''")).fetchall()
+                    locs = [str(r[0]).strip() for r in rows if r[0]]
+                    if locs:
+                        return locs
+            except Exception as e:
+                print(f"[DATA SERVICE WARNING] get_all_locations failed: {e}")
+        return ["AO_NOIDA", "AO_AGRA", "AO_NORTH AND WEST DELHI"]
+
     # 1. Dashboard summary aggregation
     # ==================================================
     def get_dashboard_summary(self):
@@ -304,34 +317,24 @@ class DataService:
             try:
                 with self.engine.connect() as conn:
                     total_cams = conn.execute(text("SELECT COUNT(*) FROM CameraList")).scalar() or 0
-                    offline_cams = conn.execute(text("SELECT COUNT(*) FROM CameraList WHERE Status = 'Offline'")).scalar() or 0
+                    offline_cams = conn.execute(text("SELECT COUNT(*) FROM CameraList WHERE Status = 'No Stream'")).scalar() or 0
                     total_dev = total_cams + 20
                     total_off = offline_cams + 2
                     total_on = total_dev - total_off
                     health = round((total_on / total_dev) * 100, 1) if total_dev > 0 else 100.0
                     
-                    active_inc = conn.execute(text("SELECT COUNT(*) FROM Incident_Data WHERE Status NOT IN ('Closed', 'Resolved')")).scalar() or 0
-                    crit_inc = conn.execute(text("SELECT COUNT(*) FROM Incident_Data WHERE Status NOT IN ('Closed', 'Resolved') AND Priority = 'Critical'")).scalar() or 0
+                    active_inc = conn.execute(text("SELECT COUNT(*) FROM AlertsDetails WHERE Status != 'Closed'")).scalar() or 0
+                    crit_inc = conn.execute(text("SELECT COUNT(*) FROM AlertsDetails WHERE Status != 'Closed' AND Severity = 'High'")).scalar() or 0
                     alerts_count = conn.execute(text("SELECT COUNT(*) FROM AlertsDetails WHERE CAST(Datetime AS DATE) = CAST(GETDATE() AS DATE)")).scalar() or 0
                     total_alerts_count = conn.execute(text("SELECT COUNT(*) FROM AlertsDetails")).scalar() or 0
-                    unack_alerts = conn.execute(text("SELECT COUNT(*) FROM AlertsDetails WHERE Status = 'Active' OR Status = 'Pending'")).scalar() or 0
+                    unack_alerts = conn.execute(text("SELECT COUNT(*) FROM AlertsDetails WHERE Status = 'Pending'")).scalar() or 0
                     
-                    lho_count = conn.execute(text("SELECT COUNT(DISTINCT Zone) FROM AlertsDetails")).scalar() or 2
-                    
-                    union_query = """
-                        SELECT COUNT(DISTINCT branch_name) FROM (
-                            SELECT Location as branch_name FROM Location_Master WHERE Location IS NOT NULL AND Location != ''
-                            UNION
-                            SELECT Area as branch_name FROM CameraList WHERE Area IS NOT NULL AND Area != ''
-                            UNION
-                            SELECT Area as branch_name FROM AlertsDetails WHERE Area IS NOT NULL AND Area != ''
-                        ) AS UnionBranches
-                    """
-                    branch_count = conn.execute(text(union_query)).scalar() or 10
+                    lho_count = conn.execute(text("SELECT COUNT(DISTINCT Zone) FROM AlertsDetails WHERE Zone IS NOT NULL AND Zone != ''")).scalar() or 1
+                    branch_count = conn.execute(text("SELECT COUNT(DISTINCT Area) FROM AlertsDetails WHERE Area IS NOT NULL AND Area != ''")).scalar() or 3
                     
                     return {
-                        "lhos_count": lho_count or 17,
-                        "branches_count": branch_count or 25,
+                        "lhos_count": lho_count,
+                        "branches_count": branch_count,
                         "total_devices": total_dev,
                         "total_online": total_on,
                         "total_offline": total_off,

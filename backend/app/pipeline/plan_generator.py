@@ -251,7 +251,8 @@ class PlanGenerator:
             aggregation = "COUNT"
             order_by = "TotalAlerts DESC"
             limit = 1 if "which" in query_lower or "highest" in query_lower or "top 1" in query_lower else 5
-            for cand in ["zone", "area", "branch"]:
+            cand_order = ["area", "location", "zone"] if "branch" in query_lower else (["zone", "area", "location"] if ("lho" in query_lower or "zone" in query_lower) else ["area", "zone"])
+            for cand in cand_order:
                 for c in table_cols:
                     if c.lower() == cand:
                         group_by = [c]
@@ -278,7 +279,8 @@ class PlanGenerator:
                 if sev_cols:
                     group_by = sev_cols
             elif any(k in query_lower for k in ["location", "branch", "area", "zone"]):
-                for cand in ["zone", "area", "branch"]:
+                cand_order = ["area", "location", "zone"] if "branch" in query_lower else (["zone", "area", "location"] if ("lho" in query_lower or "zone" in query_lower) else ["area", "zone"])
+                for cand in cand_order:
                     for c in table_cols:
                         if c.lower() == cand and c.lower() not in filtered_cols:
                             group_by = [c]

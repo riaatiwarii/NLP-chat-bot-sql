@@ -621,13 +621,27 @@ class ChatbotService:
         if not db_locations:
             db_locations = ["AO_NOIDA", "AO_AGRA", "AO_NORTH AND WEST DELHI", "Jankipuram", "Aonla", "Quila", "Civil Lines", "Junction", "Chowki Chauraha"]
 
-        # 1. Exact or Substring Matching against Live DB Locations
+        # 1. Exact or Substring Matching against Live DB Locations (AlertsDetails.Area)
         sorted_locs = sorted(db_locations, key=lambda x: len(str(x)), reverse=True)
         for loc in sorted_locs:
             loc_str = str(loc)
             loc_clean = loc_str.lower().replace("ao_", "").replace("ao ", "").strip()
             if loc_str.lower() in msg_lower or (len(loc_clean) >= 3 and loc_clean in msg_lower):
                 return loc_str
+
+        # 1.5 Narrow Fallback: if user names a specific branch (by name or code) that does NOT match AlertsDetails.Area
+        if hasattr(self, "ds") and self.ds and self.ds.use_sql_server and self.ds.engine:
+            try:
+                with self.ds.engine.connect() as conn:
+                    words = re.findall(r'\b[a-zA-Z0-9_-]+\b', msg_lower)
+                    for w in words:
+                        if len(w) >= 3 and w not in ["branch", "branches", "lho", "lhos", "zone", "zones", "show", "list", "alerts", "alert", "cctv", "camera", "cameras", "today", "yesterday"]:
+                            fallback_q = text("SELECT DISTINCT BranchCode FROM Jurisdiction_mstr WHERE BranchCode LIKE :w UNION SELECT DISTINCT Junction FROM Junction_mstr WHERE Junction LIKE :w")
+                            fb_rows = conn.execute(fallback_q, {"w": f"%{w}%"}).fetchall()
+                            if fb_rows and fb_rows[0][0]:
+                                return str(fb_rows[0][0])
+            except Exception as e:
+                pass
 
         # 2. Pattern Matching (e.g. "in lucknow", "at kanpur", "for mumbai")
         # Clean date expressions from msg_lower before matching pattern

@@ -149,7 +149,7 @@ class SchemaLinker:
                     }
 
         # 2. Dynamic Synonym-to-Literal Mapping Layer for Categorical Columns
-        # Built from real stored distinct values (Severity: Low, High, Medium; Status: Pending, Closed, Acknowledged)
+        # Built from real stored distinct values (Severity: Low, High, Medium; Status: Pending, Closed, Acknowledged; Camera Status: Active, No Stream)
         synonym_dictionary = {
             "severity": {
                 "high": ["critical", "urgent", "severe", "p1", "emergency", "high"],
@@ -158,11 +158,31 @@ class SchemaLinker:
             },
             "status": {
                 "closed": ["closed", "resolved", "done", "fixed", "completed"],
-                "active": ["active", "live", "ongoing"],
                 "pending": ["pending", "open", "unresolved", "new", "unhandled"],
-                "acknowledged": ["acknowledged", "acked", "in progress", "assigned"]
+                "acknowledged": ["acknowledged", "acked", "in progress", "assigned"],
+                "no stream": ["offline", "inactive", "down", "dead", "broken", "no stream"]
             }
         }
+
+        # Domain Entity Vocabulary Grounding Rules (Branch -> AlertsDetails.Area; LHO/Zone -> AlertsDetails.Zone)
+        if "branch" in clean_query_words or "branches" in clean_query_words:
+            grounded["term->branch"] = {
+                "table_name": "AlertsDetails",
+                "column_name": "Area",
+                "user_term": "branch",
+                "db_value": "AlertsDetails.Area",
+                "match_type": "domain_vocabulary",
+                "confidence": 1.00
+            }
+        if "lho" in clean_query_words or "lhos" in clean_query_words or "zone" in clean_query_words:
+            grounded["term->lho"] = {
+                "table_name": "AlertsDetails",
+                "column_name": "Zone",
+                "user_term": "lho",
+                "db_value": "AlertsDetails.Zone",
+                "match_type": "domain_vocabulary",
+                "confidence": 1.00
+            }
 
         for word in clean_query_words:
             for cat_col, mapping in synonym_dictionary.items():

@@ -7,8 +7,8 @@
   },
   {
     "question": "list the names and locations of all cameras that are currently Offline in Jankipuram area",
-    "sqlite": "SELECT CameraName, CameraLocation FROM CameraList WHERE Status = 'Offline' AND Area LIKE '%Jankipuram%';",
-    "mssql": "SELECT CameraName, CameraLocation FROM CameraList WHERE Status = 'Offline' AND Area LIKE '%Jankipuram%';",
+    "sqlite": "SELECT CameraName, CameraLocation FROM CameraList WHERE Status = 'No Stream' AND Area LIKE '%Jankipuram%';",
+    "mssql": "SELECT CameraName, CameraLocation FROM CameraList WHERE Status = 'No Stream' AND Area LIKE '%Jankipuram%';",
     "patterns": ["single_table_filter"]
   },
   {
@@ -145,8 +145,8 @@
   },
   {
     "question": "Which branch has the highest count of unresolved alerts today?",
-    "sqlite": "SELECT Area as branch_name, COUNT(*) as unresolved_count FROM AlertsDetails WHERE Status IN ('Active', 'Pending') AND date(Datetime) = date('now') GROUP BY Area ORDER BY unresolved_count DESC LIMIT 1;",
-    "mssql": "SELECT TOP 1 Area as branch_name, COUNT(*) as unresolved_count FROM AlertsDetails WHERE Status IN ('Active', 'Pending') AND CAST(Datetime AS DATE) = CAST(GETDATE() AS DATE) GROUP BY Area ORDER BY unresolved_count DESC;",
+    "sqlite": "SELECT Area as branch_name, COUNT(*) as unresolved_count FROM AlertsDetails WHERE Status != 'Closed' AND date(Datetime) = date('now') GROUP BY Area ORDER BY unresolved_count DESC LIMIT 1;",
+    "mssql": "SELECT TOP 1 Area as branch_name, COUNT(*) as unresolved_count FROM AlertsDetails WHERE Status != 'Closed' AND CAST(Datetime AS DATE) = CAST(GETDATE() AS DATE) GROUP BY Area ORDER BY unresolved_count DESC;",
     "patterns": ["single_table_filter", "aggregation_groupby", "time_window_filter", "subquery_top_n_per_group"]
   },
   {

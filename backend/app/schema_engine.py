@@ -3,6 +3,7 @@ import json
 import numpy as np
 from sqlalchemy import inspect, text
 from sentence_transformers import SentenceTransformer, util
+from app.config import config
 
 class SchemaEngine:
     """
@@ -55,14 +56,11 @@ class SchemaEngine:
 
         try:
             raw_table_names = inspector.get_table_names()
-            # Filter out system, migration, and framework metadata tables
-            excluded_prefixes = ('__', 'sys', 'dtproperties', 'AspNet', 'Log4', 'API_', 'DMS_', 'Token', 'AccessToken')
-            table_names = [t for t in raw_table_names if not any(t.startswith(p) for p in excluded_prefixes)]
-            
-            # Prioritize core operational monitoring tables first
-            priority_tables = ['CameraList', 'Incident_Data', 'AlertsDetails', 'Master_CamDetails', 'Location_Master', 'SOP_MASTER', 'IncidentHistory']
-            ordered_tables = [t for t in priority_tables if t in table_names] + [t for t in table_names if t not in priority_tables]
-            table_names = ordered_tables[:30]  # Cap to top 30 tables for lightning-fast vector indexing
+            # Strictly restrict table introspection to ALLOWED_TABLES
+            allowed_set = set(config.ALLOWED_TABLES)
+            table_names = [t for t in raw_table_names if t in allowed_set]
+            if not table_names:
+                table_names = list(allowed_set)
         except Exception as e:
             print(f"[SCHEMA ENGINE ERROR] Could not fetch table names: {e}")
             return {}
