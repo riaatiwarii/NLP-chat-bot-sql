@@ -64,6 +64,7 @@ class PipelineOrchestrator:
             embedder=self.embedder
         ) # Stage 6
         self.plan_generator = PlanGenerator() # Stage 7
+        self.plan_generator.validate_schema_integrity({"tables": self.tables_schema})
         self.plan_validator = PlanValidator(schema_graph=self.schema_graph) # Stage 8
         self.sql_generator = SQLGenerator() # Stage 9
         self.sql_validator = SQLValidator(db_engine=self.db_engine) # Stage 10

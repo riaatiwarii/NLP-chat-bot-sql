@@ -76,27 +76,74 @@ class PlanGenerator:
         prompt_parts.append("\nJSON Output:")
         return "".join(prompt_parts)
 
+    def _find_best_table_for_columns(self, required_cols: list[str], schema: dict) -> str:
+        """
+        Dynamic Schema-Driven Table Routing Rule:
+        Scores live introspected tables against required column capabilities.
+        Routes to whichever table actually possesses the required columns in the live DB schema.
+        """
+        allowed_set = set(config.ALLOWED_TABLES)
+        tables_dict = schema.get("tables", {})
+        
+        req_lowers = [rc.lower() for rc in required_cols]
+        best_table = None
+        max_score = -1
+        
+        for t_name, cols_info in tables_dict.items():
+            if t_name not in allowed_set:
+                continue
+            col_names = [c["name"].lower() if isinstance(c, dict) else str(c).lower() for c in cols_info]
+            score = sum(1 for rc in req_lowers if rc in col_names)
+            
+            if score > max_score:
+                max_score = score
+                best_table = t_name
+                
+        return best_table or (list(tables_dict.keys())[0] if tables_dict else "AlertsDetails")
+
+    def validate_schema_integrity(self, schema: dict) -> list[str]:
+        """
+        Startup/Build-Time Schema Integrity Safeguard:
+        Verifies every table and column referenced in default displays exists in live DB schema.
+        Logs loud warnings for missing columns.
+        """
+        warnings = []
+        tables_dict = schema.get("tables", {})
+        for t_name, cols_info in tables_dict.items():
+            if t_name not in config.ALLOWED_TABLES:
+                continue
+            c_names = {c["name"].lower() if isinstance(c, dict) else str(c).lower() for c in cols_info}
+            for default_col in config.DEFAULT_DISPLAY_COLUMNS:
+                if default_col.lower() not in c_names:
+                    msg = f"[SCHEMA INTEGRITY WARNING] Default display column '{default_col}' is missing from live table '{t_name}'."
+                    warnings.append(msg)
+                    print(msg, flush=True)
+        return warnings
+
     def _deterministic_plan_builder(
         self, query: str, entities: list, intent: str, schema: dict, prior_plan: dict, is_followup: bool
     ) -> dict:
         allowed_set = set(config.ALLOWED_TABLES)
         raw_tables = list(schema.get("tables", {}).keys())
         tables = [t for t in raw_tables if t in allowed_set]
-        if not tables:
-            tables = [t for t in ["AlertsDetails", "AlertHistory", "AlertSubtype"] if t in allowed_set]
-
         query_lower = query.lower()
 
-        # Prioritize primary alert/telemetry tables for dashboard/summary/detail queries
-        primary_table = None
-        if any(w in query_lower for w in ["summary", "dashboard", "alert", "telemetry"]):
-            for pref in ["AlertsDetails", "AlertHistory", "AlertSubtype"]:
-                if pref in tables:
-                    primary_table = pref
-                    break
+        # Build required column capabilities for dynamic table scoring
+        required_capabilities = []
+        if any(w in query_lower for w in ["summary", "dashboard", "alert", "alerts"]):
+            required_capabilities.extend(["Status", "Severity", "Zone", "Area", "Datetime"])
+        if any(w in query_lower for w in ["camera", "cctv"]):
+            required_capabilities.extend(["CameraName", "Status", "Url", "Area"])
 
-        if not primary_table:
-            primary_table = tables[0] if tables else "AlertsDetails"
+        for e in entities:
+            if e.get("is_resolved") and e.get("matched_column"):
+                required_capabilities.append(e["matched_column"])
+
+        if not required_capabilities:
+            required_capabilities = ["Status", "Zone", "Area", "Datetime"]
+
+        # Dynamic Table Selection derived from live schema capabilities
+        primary_table = self._find_best_table_for_columns(required_capabilities, schema)
 
         table_cols_info = schema.get("tables", {}).get(primary_table, [])
         table_cols = [c["name"] if isinstance(c, dict) else str(c) for c in table_cols_info]
