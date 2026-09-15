@@ -85,6 +85,42 @@ class PipelineOrchestrator:
         """
         sid = session_id or str(uuid.uuid4())
 
+        # System Intent Interceptor: DASHBOARD_SUMMARY
+        query_low = user_query.lower()
+        if any(phrase in query_low for phrase in [
+            "dashboard summary", "dashboard overview", "today's dashboard summary",
+            "todays dashboard summary", "show today's dashboard summary",
+            "system overview", "central dashboard summary"
+        ]):
+            from app.data_service import DataService
+            ds = DataService()
+            s = ds.get_dashboard_summary()
+            resp_text = (
+                f"Here is today's Centralized Monitoring System Dashboard Summary:\n\n"
+                f"### System Operational Overview\n"
+                f"- **System Health**: `{s.get('system_health_pct', 100.0)}%`\n"
+                f"- **Total Monitored LHO Circles**: `{s.get('lhos_count', 1)}`\n"
+                f"- **Total Monitored Branches**: `{s.get('branches_count', 3)}`\n"
+                f"- **Total Configured Devices**: `{s.get('total_devices', 0)}` (`{s.get('total_online', 0)}` Online, `{s.get('total_offline', 0)}` Offline / Inactive)\n"
+                f"- **Offline CCTV Cameras**: `{s.get('offline_cameras', 0)}` channels\n\n"
+                f"### Alert & Telemetry Metrics\n"
+                f"- **Total Registered Alerts**: `{s.get('total_alerts_count', 0):,}`\n"
+                f"- **Alerts Registered Today**: `{s.get('alerts_today_count', 0):,}`\n"
+                f"- **Pending / Unresolved Alerts**: `{s.get('unacknowledged_alerts_count', 0):,}`\n"
+                f"- **Active Incident Flags**: `{s.get('active_incidents_count', 0):,}` (`{s.get('critical_incidents_count', 0):,}` High Severity)\n"
+            )
+            self.session_memory.add_turn(sid, user_query, {"intent": "DASHBOARD_SUMMARY"}, "N/A (System Telemetry Summary)", resp_text[:200])
+            return {
+                "response": resp_text,
+                "sql": "N/A (System Telemetry Summary)",
+                "plan": {"intent": "DASHBOARD_SUMMARY", "tables_needed": ["AlertsDetails", "CameraList"]},
+                "confidence_score": 1.0,
+                "is_abstention": False,
+                "used_fallback": False,
+                "session_id": sid,
+                "rows_count": 1
+            }
+
         # STAGE 1: Input Normalization (spell correction)
         normalized_query = self.normalizer.normalize(user_query)
 

@@ -110,7 +110,7 @@ class PlanGenerator:
         warnings = []
         tables_dict = schema.get("tables", {})
         for t_name, cols_info in tables_dict.items():
-            if t_name not in config.ALLOWED_TABLES:
+            if t_name not in ["AlertsDetails", "CameraList"]:
                 continue
             c_names = {c["name"].lower() if isinstance(c, dict) else str(c).lower() for c in cols_info}
             for default_col in config.DEFAULT_DISPLAY_COLUMNS:

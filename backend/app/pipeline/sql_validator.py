@@ -30,6 +30,12 @@ class SQLValidator:
             if not re.search(r'\bSELECT\s+TOP\b', clean_sql, re.IGNORECASE):
                 clean_sql = re.sub(r'^SELECT\b', f'SELECT TOP {limit_num}', clean_sql, flags=re.IGNORECASE)
 
+        # Auto-heal SQLite date syntax to T-SQL for SQL Server
+        clean_sql = re.sub(r"date\(\s*datetime\s*\)\s*>=\s*date\('now'\)\s+and\s+date\(\s*datetime\s*\)\s*<\s*date\('now',\s*'\+1 day'\)", "CAST(Datetime AS DATE) = CAST(GETDATE() AS DATE)", clean_sql, flags=re.IGNORECASE)
+        clean_sql = re.sub(r"date\(\s*([a-zA-Z0-9_]+)\s*\)\s*=\s*date\('now'\)", r"CAST(\1 AS DATE) = CAST(GETDATE() AS DATE)", clean_sql, flags=re.IGNORECASE)
+        clean_sql = re.sub(r"date\('now'\)", "CAST(GETDATE() AS DATE)", clean_sql, flags=re.IGNORECASE)
+        clean_sql = re.sub(r"date\(\s*([a-zA-Z0-9_]+)\s*\)", r"CAST(\1 AS DATE)", clean_sql, flags=re.IGNORECASE)
+
         # 1. Syntactic check via sqlglot AST parser (with T-SQL & generic dialect fallbacks)
         parsed = None
         parse_err = None
