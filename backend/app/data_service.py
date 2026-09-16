@@ -313,41 +313,45 @@ class DataService:
     # 1. Dashboard summary aggregation
     # ==================================================
     def get_dashboard_summary(self):
-        if self.use_sql_server:
+        if self.use_sql_server and self.engine:
             try:
                 with self.engine.connect() as conn:
-                    total_cams = conn.execute(text("SELECT COUNT(*) FROM CameraList")).scalar() or 0
-                    offline_cams = conn.execute(text("SELECT COUNT(*) FROM CameraList WHERE Status = 'No Stream'")).scalar() or 0
-                    total_dev = total_cams + 20
-                    total_off = offline_cams + 2
-                    total_on = total_dev - total_off
-                    health = round((total_on / total_dev) * 100, 1) if total_dev > 0 else 100.0
+                    q = """
+                        SELECT 
+                            TRIM(COALESCE(Area, Location)) as branch_name,
+                            COUNT(*) as total_alerts,
+                            SUM(CASE WHEN Status = 'Pending' THEN 1 ELSE 0 END) as pending_alerts,
+                            SUM(CASE WHEN Status = 'Closed' THEN 1 ELSE 0 END) as closed_alerts,
+                            SUM(CASE WHEN Status = 'Acknowledged' THEN 1 ELSE 0 END) as ack_alerts
+                        FROM AlertsDetails
+                        GROUP BY TRIM(COALESCE(Area, Location))
+                        ORDER BY total_alerts DESC
+                    """
+                    rows = conn.execute(text(q)).mappings().all()
+                    tot_all = sum(r["total_alerts"] for r in rows) or 1
                     
-                    active_inc = conn.execute(text("SELECT COUNT(*) FROM AlertsDetails WHERE Status != 'Closed'")).scalar() or 0
-                    crit_inc = conn.execute(text("SELECT COUNT(*) FROM AlertsDetails WHERE Status != 'Closed' AND Severity = 'High'")).scalar() or 0
-                    alerts_count = conn.execute(text("SELECT COUNT(*) FROM AlertsDetails WHERE CAST(Datetime AS DATE) = CAST(GETDATE() AS DATE)")).scalar() or 0
-                    total_alerts_count = conn.execute(text("SELECT COUNT(*) FROM AlertsDetails")).scalar() or 0
-                    unack_alerts = conn.execute(text("SELECT COUNT(*) FROM AlertsDetails WHERE Status = 'Pending'")).scalar() or 0
-                    
-                    lho_count = conn.execute(text("SELECT COUNT(DISTINCT Zone) FROM AlertsDetails WHERE Zone IS NOT NULL AND Zone != ''")).scalar() or 1
-                    branch_count = conn.execute(text("SELECT COUNT(DISTINCT Area) FROM AlertsDetails WHERE Area IS NOT NULL AND Area != ''")).scalar() or 3
+                    breakdown_list = []
+                    for r in rows:
+                        pct = round((r["total_alerts"] / tot_all) * 100, 2)
+                        breakdown_list.append({
+                            "branch_name": r["branch_name"] or "Unassigned",
+                            "total_alerts": r["total_alerts"],
+                            "pending_alerts": r["pending_alerts"],
+                            "closed_alerts": r["closed_alerts"],
+                            "ack_alerts": r["ack_alerts"],
+                            "share_pct": pct
+                        })
+                        
+                    tot_alerts = conn.execute(text("SELECT COUNT(*) FROM AlertsDetails")).scalar() or tot_all
+                    today_alerts = conn.execute(text("SELECT COUNT(*) FROM AlertsDetails WHERE CAST(Datetime AS DATE) = CAST(GETDATE() AS DATE)")).scalar() or 0
                     
                     return {
-                        "lhos_count": lho_count,
-                        "branches_count": branch_count,
-                        "total_devices": total_dev,
-                        "total_online": total_on,
-                        "total_offline": total_off,
-                        "offline_cameras": offline_cams,
-                        "system_health_pct": health,
-                        "active_incidents_count": active_inc,
-                        "critical_incidents_count": crit_inc,
-                        "alerts_today_count": alerts_count,
-                        "total_alerts_count": total_alerts_count,
-                        "unacknowledged_alerts_count": unack_alerts
+                        "total_alerts_count": tot_alerts,
+                        "alerts_today_count": today_alerts,
+                        "breakdown": breakdown_list
                     }
             except Exception as e:
-                print(f"[SQL ERROR] get_dashboard_summary failed (auto-reconnect active): {e}")
+                print(f"[SQL ERROR] get_dashboard_summary failed: {e}")
                 
         return self._fallback_dashboard_summary()
 

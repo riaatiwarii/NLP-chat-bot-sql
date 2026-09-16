@@ -1,0 +1,175 @@
+[
+  {
+    "id": 1,
+    "category": "Branch Queries",
+    "query": "Which branch has the highest number of alerts?",
+    "status": "PASS",
+    "reasons": [],
+    "sql": "",
+    "response_snippet": "Alert breakdown grouped by **Monitored Branch / Area** (total **47,715 alerts** across **3 categories**):  ### Security Alerts Grouped by Monitored Branch / Area | Monitored Branch / Area | Total Aler"
+  },
+  {
+    "id": 2,
+    "category": "Branch Queries",
+    "query": "Which branch has the most unresolved alerts?",
+    "status": "FAIL",
+    "reasons": [
+      "Branch query mapped to non-AlertsDetails table or invalid branch value"
+    ],
+    "sql": "",
+    "response_snippet": "Found a total of **46,764 matching security alerts** in the database with status **`Closed / Completed`** (showing top 15 below):  | Alert ID | Type | Branch Name | Severity | Datetime | Status | |---"
+  },
+  {
+    "id": 3,
+    "category": "Branch Queries",
+    "query": "Show alerts for branch AO_NOIDA",
+    "status": "PASS",
+    "reasons": [],
+    "sql": "",
+    "response_snippet": "Here are the most recent **5 alert(s)** filtered by from **AO_NOIDA**, ordered by time:  | Alert ID | Type | Branch/Area | Severity | Timestamp | Status | Remarks | |---|---|---|---|---|---|---| | 147"
+  },
+  {
+    "id": 4,
+    "category": "Branch Queries",
+    "query": "List all branches",
+    "status": "PASS",
+    "reasons": [],
+    "sql": "",
+    "response_snippet": "The Centralized Monitoring System covers **3 monitored bank branches / areas**:  ### Monitored Branches & Alert Volumes | # | Monitored Branch / Area | Registered Alerts | |---|---|---| | 1 | **AO_NOI"
+  },
+  {
+    "id": 5,
+    "category": "Branch Queries",
+    "query": "Show today's dashboard summary",
+    "status": "PASS",
+    "reasons": [],
+    "sql": "N/A (System Telemetry Summary)",
+    "response_snippet": "No telemetry or security alerts were registered on **2026-09-16** in the Centralized Monitoring System."
+  },
+  {
+    "id": 6,
+    "category": "LHO Queries",
+    "query": "Which LHO has the highest number of alerts?",
+    "status": "PASS",
+    "reasons": [],
+    "sql": "",
+    "response_snippet": "Alert breakdown grouped by **Monitoring Zone** (total **47,715 alerts** across **1 categories**):  ### Security Alerts Grouped by Monitoring Zone | Monitoring Zone | Total Alerts Registered | Pending "
+  },
+  {
+    "id": 7,
+    "category": "LHO Queries",
+    "query": "Show alerts for zone NEW DELHI",
+    "status": "PASS",
+    "reasons": [],
+    "sql": "",
+    "response_snippet": "Retrieved **100 total records** matching your request. Displaying top 15 results below:  | AlertID | AlertType | Area | Datetime | | --- | --- | --- | --- | | 145562 | Analytics | AO_AGRA | 2026-09-11"
+  },
+  {
+    "id": 8,
+    "category": "LHO Queries",
+    "query": "List all LHOs",
+    "status": "PASS",
+    "reasons": [],
+    "sql": "",
+    "response_snippet": "The Centralized Monitoring System monitors **2 Local Head Office (LHO) Circles**:  ### SBI LHO Command Circles | # | LHO Circle / Command Centre | |---|---| | 1 | **JnK** | | 2 | **NEW DELHI** |  *(No"
+  },
+  {
+    "id": 9,
+    "category": "Status Queries",
+    "query": "Show unresolved alerts",
+    "status": "PASS",
+    "reasons": [],
+    "sql": "",
+    "response_snippet": "Found a total of **46,764 matching security alerts** in the database with status **`Closed / Completed`** (showing top 15 below):  | Alert ID | Type | Branch Name | Severity | Datetime | Status | |---"
+  },
+  {
+    "id": 10,
+    "category": "Status Queries",
+    "query": "Show closed alerts",
+    "status": "PASS",
+    "reasons": [],
+    "sql": "",
+    "response_snippet": "Found a total of **46,764 matching security alerts** in the database with status **`Closed / Completed`** (showing top 15 below):  | Alert ID | Type | Branch Name | Severity | Datetime | Status | |---"
+  },
+  {
+    "id": 11,
+    "category": "Status Queries",
+    "query": "How many pending alerts are there?",
+    "status": "PASS",
+    "reasons": [],
+    "sql": "",
+    "response_snippet": "There are **949 pending alerts** across all monitored branches (out of **47,715 total alerts**, `1.99%`).  ### Recent Pending Alerts Sample | Alert ID | Type | Branch Name | Severity | Datetime | Stat"
+  },
+  {
+    "id": 12,
+    "category": "Status Queries",
+    "query": "Show acknowledged alerts",
+    "status": "PASS",
+    "reasons": [],
+    "sql": "",
+    "response_snippet": "Found a total of **2 matching security alerts** in the database with status **`Acknowledged`** (showing top 2 below):  | Alert ID | Type | Branch Name | Severity | Datetime | Status | |---|---|---|---"
+  },
+  {
+    "id": 13,
+    "category": "Camera Queries",
+    "query": "Which cameras are offline?",
+    "status": "PASS",
+    "reasons": [],
+    "sql": "",
+    "response_snippet": "Found **12 Offline / No Stream CCTV Cameras**:  | Camera Name | Camera ID | Branch / Area | Status | |---|---|---|---| | Camera014 | 14 | Aonla | **No Stream** | | Camera015 | 15 | Junction | **No Str"
+  },
+  {
+    "id": 14,
+    "category": "Camera Queries",
+    "query": "Show inactive cameras",
+    "status": "PASS",
+    "reasons": [],
+    "sql": "",
+    "response_snippet": "Found **12 Offline / No Stream CCTV Cameras**:  | Camera Name | Camera ID | Branch / Area | Status | |---|---|---|---| | Camera014 | 14 | Aonla | **No Stream** | | Camera015 | 15 | Junction | **No Str"
+  },
+  {
+    "id": 15,
+    "category": "Camera Queries",
+    "query": "List active cameras",
+    "status": "PASS",
+    "reasons": [],
+    "sql": "",
+    "response_snippet": "Found **13 Online / Active CCTV Cameras**:  | Camera Name | Camera ID | Branch / Area | Status | |---|---|---|---| | Camera001 | 1 | Quila | **Active** | | Camera002 | 2 | Aonla | **Active** | | Camer"
+  },
+  {
+    "id": 16,
+    "category": "Camera Queries",
+    "query": "Show cameras in Civil Lines",
+    "status": "PASS",
+    "reasons": [],
+    "sql": "",
+    "response_snippet": "Found **4 CCTV Cameras** configured in **Civil Lines** (**2 Active**, **2 No Stream**):  ### CCTV Cameras in **Civil Lines** | Camera Name | Camera ID | Branch / Area | Operational Status | |---|---|-"
+  },
+  {
+    "id": 17,
+    "category": "Severity Queries",
+    "query": "Show high severity alerts",
+    "status": "PASS",
+    "reasons": [],
+    "sql": "",
+    "response_snippet": "Retrieved **1,457 High / Critical priority alerts** (**894 Pending**, **561 Closed**):  | Alert ID | Type | Branch Name | Severity | Datetime | Status | |---|---|---|---|---|---| | 147173 | Analytics "
+  },
+  {
+    "id": 18,
+    "category": "Severity Queries",
+    "query": "Count medium severity alerts",
+    "status": "PASS",
+    "reasons": [],
+    "sql": "",
+    "response_snippet": "Retrieved **45,140 Medium priority alerts** (**48 Pending**, **45,092 Closed**):  | Alert ID | Type | Branch Name | Severity | Datetime | Status | |---|---|---|---|---|---| | 146851 | Analytics | AO_N"
+  },
+  {
+    "id": 19,
+    "category": "Fallback Queries",
+    "query": "Show alerts for branch 1131",
+    "status": "PASS",
+    "reasons": [],
+    "sql": "",
+    "response_snippet": "Here are the **most recent telemetry and anomaly alerts** registered in the Centralized Monitoring System:  | Alert ID | Type | Branch Name | Severity | Timestamp | Status | |---|---|---|---|---|---| "
+  }
+]

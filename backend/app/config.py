@@ -25,11 +25,10 @@ class Config:
         os.getenv("DATABASE_URL", "sqlite:///backend/app/db.json")
     )
     
-    # Target Database Table Filtering (Scoped to user selected tables)
+    # Target Database Table Filtering (Scoped strictly to 6 remaining allowed tables)
     ALLOWED_TABLES: list = [
-        "AlertAttachment", "AlertHistory", "AlertsDetails", "AlertSubtype",
-        "AlertTypes", "CameraList", "Jurisdiction_mstr", "RawAttachments",
-        "Sensor_Master", "Junction_mstr"
+        "AlertAttachment", "AlertsDetails", "Jurisdiction_mstr",
+        "RawAttachments", "Sensor_Master", "Junction_mstr"
     ]
 
     # Redis Configuration (Optional read/write cache for Alias Table and Session Memory)

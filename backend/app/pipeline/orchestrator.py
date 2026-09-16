@@ -85,7 +85,7 @@ class PipelineOrchestrator:
         """
         sid = session_id or str(uuid.uuid4())
 
-        # System Intent Interceptor: DASHBOARD_SUMMARY
+        # System Intent Interceptor: DASHBOARD_SUMMARY (Option B Layout: Area/Zone Breakdown Table)
         query_low = user_query.lower()
         if any(phrase in query_low for phrase in [
             "dashboard summary", "dashboard overview", "today's dashboard summary",
@@ -95,30 +95,33 @@ class PipelineOrchestrator:
             from app.data_service import DataService
             ds = DataService()
             s = ds.get_dashboard_summary()
+            breakdown = s.get("breakdown", [])
+            tot_alerts = s.get("total_alerts_count", 0)
+            
+            tbl = "| Monitored Branch / Area | Total Alerts Registered | Pending Alerts | Closed / Resolved | Share |\n|---|---|---|---|---|\n"
+            for item in breakdown:
+                tbl += f"| **{item['branch_name']}** | **{item['total_alerts']:,}** | {item['pending_alerts']:,} | {item['closed_alerts']:,} | {item['share_pct']}% |\n"
+                
+            top_name = breakdown[0]['branch_name'] if breakdown else 'N/A'
+            top_cnt = breakdown[0]['total_alerts'] if breakdown else 0
+            top_pct = breakdown[0]['share_pct'] if breakdown else 0
+            
             resp_text = (
-                f"Here is today's Centralized Monitoring System Dashboard Summary:\n\n"
-                f"### System Operational Overview\n"
-                f"- **System Health**: `{s.get('system_health_pct', 100.0)}%`\n"
-                f"- **Total Monitored LHO Circles**: `{s.get('lhos_count', 1)}`\n"
-                f"- **Total Monitored Branches**: `{s.get('branches_count', 3)}`\n"
-                f"- **Total Configured Devices**: `{s.get('total_devices', 0)}` (`{s.get('total_online', 0)}` Online, `{s.get('total_offline', 0)}` Offline / Inactive)\n"
-                f"- **Offline CCTV Cameras**: `{s.get('offline_cameras', 0)}` channels\n\n"
-                f"### Alert & Telemetry Metrics\n"
-                f"- **Total Registered Alerts**: `{s.get('total_alerts_count', 0):,}`\n"
-                f"- **Alerts Registered Today**: `{s.get('alerts_today_count', 0):,}`\n"
-                f"- **Pending / Unresolved Alerts**: `{s.get('unacknowledged_alerts_count', 0):,}`\n"
-                f"- **Active Incident Flags**: `{s.get('active_incidents_count', 0):,}` (`{s.get('critical_incidents_count', 0):,}` High Severity)\n"
+                f"Alert breakdown grouped by **Monitored Branch / Area** (total **{tot_alerts:,} alerts** across **{len(breakdown)} categories**):\n\n"
+                f"### Security Alerts Grouped by Monitored Branch / Area\n{tbl}\n"
+                f"### Operations Summary\n"
+                f"Highest category: **{top_name}** representing **{top_cnt:,} alerts** (`{top_pct}%` share of volume)."
             )
             self.session_memory.add_turn(sid, user_query, {"intent": "DASHBOARD_SUMMARY"}, "N/A (System Telemetry Summary)", resp_text[:200])
             return {
                 "response": resp_text,
                 "sql": "N/A (System Telemetry Summary)",
-                "plan": {"intent": "DASHBOARD_SUMMARY", "tables_needed": ["AlertsDetails", "CameraList"]},
+                "plan": {"intent": "DASHBOARD_SUMMARY", "tables_needed": ["AlertsDetails"]},
                 "confidence_score": 1.0,
                 "is_abstention": False,
                 "used_fallback": False,
                 "session_id": sid,
-                "rows_count": 1
+                "rows_count": len(breakdown)
             }
 
         # STAGE 1: Input Normalization (spell correction)

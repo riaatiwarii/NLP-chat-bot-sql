@@ -20,7 +20,7 @@ if exist "%~dp0dist\SbiCmsGateway\.env" (
 
 echo.
 echo [SERVER] Launching SbiCmsGateway.exe...
-echo [ENDPOINT] Gateway API active at: http://localhost:8000
+echo [ENDPOINT] Gateway API active at: http://localhost:8001
 echo.
 
 "%~dp0dist\SbiCmsGateway\SbiCmsGateway.exe"

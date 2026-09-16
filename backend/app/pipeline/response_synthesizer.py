@@ -133,17 +133,37 @@ class ResponseSynthesizer:
         filtered = re.sub(r'\b[A-Za-z0-9_]+_Data\b', 'records', filtered, flags=re.IGNORECASE)
         return filtered
 
+    def _format_value(self, val) -> str:
+        if val is None or str(val).strip() == "":
+            return ""
+        from datetime import datetime
+        if isinstance(val, datetime):
+            return val.strftime("%d %b %Y, %I:%M %p")
+        val_str = str(val).strip()
+        # Exclude raw lat/long coordinate strings
+        if re.match(r'^\d+\.\d+,\d+\.\d+$', val_str):
+            return ""
+        # Match ISO datetime string pattern (e.g. 2026-07-28T11:21:22.850000 or 2026-07-28 11:21:22)
+        iso_match = re.match(r'^(\d{4}-\d{2}-\d{2})[T\s](\d{2}:\d{2}:\d{2})(?:\.\d+)?$', val_str)
+        if iso_match:
+            try:
+                dt = datetime.fromisoformat(val_str.replace("Z", ""))
+                return dt.strftime("%d %b %Y, %I:%M %p")
+            except Exception:
+                pass
+        return val_str
+
     def _format_markdown_table(self, rows: list[dict], column_names: list[str]) -> str:
         if not rows or not column_names:
             return ""
 
-        headers = column_names
+        headers = [c for c in column_names if c.lower() != "location"]
         header_row = "| " + " | ".join(headers) + " |"
         sep_row = "| " + " | ".join(["---"] * len(headers)) + " |"
 
         data_rows = []
         for r in rows[:15]:
-            vals = [str(r.get(col, "")).replace("|", "\\|") for col in headers]
+            vals = [self._format_value(r.get(col, "")).replace("|", "\\|") for col in headers]
             data_rows.append("| " + " | ".join(vals) + " |")
 
         return "\n".join([header_row, sep_row] + data_rows)

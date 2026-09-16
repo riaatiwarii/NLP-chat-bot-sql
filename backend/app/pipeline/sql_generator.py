@@ -103,8 +103,11 @@ class SQLGenerator:
             col_expr = f"{primary_table}.[{target_col}]" if target_col else "1"
             select_clause = f"{intent}({col_expr})"
         elif select_cols:
-            qualified_cols = [f"{primary_table}.[{c}]" for c in select_cols]
-            select_clause = ", ".join(qualified_cols)
+            valid_qualified = []
+            for sc in select_cols:
+                matched_name = next((tc for tc in table_cols if tc.lower() == sc.lower()), sc)
+                valid_qualified.append(f"{primary_table}.[{matched_name}]")
+            select_clause = ", ".join(valid_qualified)
 
         distinct = plan.get("distinct") or intent == "SELECT_DISTINCT"
         order_by = plan.get("order_by")
@@ -114,7 +117,11 @@ class SQLGenerator:
 
         if distinct:
             if select_cols:
-                select_clause = ", ".join([f"RTRIM(LTRIM({primary_table}.[{c}])) AS [{c}]" for c in select_cols])
+                valid_sel = []
+                for sc in select_cols:
+                    matched_name = next((tc for tc in table_cols if tc.lower() == sc.lower()), sc)
+                    valid_sel.append(f"RTRIM(LTRIM({primary_table}.[{matched_name}])) AS [{matched_name}]")
+                select_clause = ", ".join(valid_sel)
             else:
                 select_clause = f"RTRIM(LTRIM({primary_table}.[Zone])) AS [Zone]"
 
@@ -127,14 +134,12 @@ class SQLGenerator:
             if "tables" in schema_subset and sec_table in schema_subset["tables"]:
                 sec_cols = [c["name"] if isinstance(c, dict) else str(c) for c in schema_subset["tables"][sec_table]]
             
-            # Find matching column name between tables
-            common = [c for c in table_cols if c in sec_cols and not c.lower().endswith("id")]
-            if not common:
-                common = [c for c in table_cols if c in sec_cols]
-
+            # Find matching FK column name between tables
+            ignored_join_keys = ["systemname", "status", "area", "zone", "location", "createdby", "updatedby", "id", "guid"]
+            common = [c for c in table_cols if c in sec_cols and c.lower() not in ignored_join_keys]
             if common:
                 join_col = common[0]
-                sql += f" JOIN {sec_table} ON {primary_table}.{join_col} = {sec_table}.{join_col}"
+                sql += f" JOIN {sec_table} ON {primary_table}.[{join_col}] = {sec_table}.[{join_col}]"
 
         # Build WHERE clause components from plan filters
         where_parts = []

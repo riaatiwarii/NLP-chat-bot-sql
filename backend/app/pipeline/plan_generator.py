@@ -173,6 +173,25 @@ class PlanGenerator:
 
         filters = []
         filtered_cols = set()
+
+        # Generic Sensor-Type Awareness Rule on Sensor_Master
+        if primary_table == "Sensor_Master":
+            if any(w in query_lower for w in ["camera", "cctv"]):
+                filters.append({"table": primary_table, "column": "SensorType", "operator": "=", "value": "Camera"})
+                filtered_cols.add("sensortype")
+            elif any(w in query_lower for w in ["access control", "accesscontrol"]):
+                filters.append({"table": primary_table, "column": "SensorType", "operator": "=", "value": "AccessControl"})
+                filtered_cols.add("sensortype")
+            elif any(w in query_lower for w in ["sas", "sas sensor"]):
+                filters.append({"table": primary_table, "column": "SensorType", "operator": "=", "value": "SAS"})
+                filtered_cols.add("sensortype")
+
+            if any(w in query_lower for w in ["offline", "inactive", "non operational", "non-operational", "down", "broken"]):
+                filters.append({"table": primary_table, "column": "Status", "operator": "=", "value": "Non Operational"})
+                filtered_cols.add("status")
+            elif any(w in query_lower for w in ["online", "active", "operational", "working"]):
+                filters.append({"table": primary_table, "column": "Status", "operator": "=", "value": "Operational"})
+                filtered_cols.add("status")
         for e in entities:
             if e.get("type") in ["date_relative", "date_explicit"]:
                 continue

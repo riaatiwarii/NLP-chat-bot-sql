@@ -940,7 +940,10 @@ class ChatbotService:
                 where_conds.append("Severity = 'Low'")
                 labels_grp.append("with **Low** severity")
 
-            if any(s in msg_lower for s in ["closed", "completed", "resolved"]):
+            if "unresolved" in msg_lower:
+                where_conds.append("(Status NOT LIKE '%Closed%' AND Status NOT LIKE '%Completed%')")
+                labels_grp.append("with **Unresolved** status")
+            elif any(s in msg_lower for s in ["closed", "completed"]) or re.search(r'\bresolved\b', msg_lower):
                 where_conds.append("(Status LIKE '%Closed%' OR Status LIKE '%Completed%')")
                 labels_grp.append("with **Closed** status")
             elif any(s in msg_lower for s in ["pending", "active", "open"]):
@@ -1121,8 +1124,11 @@ class ChatbotService:
                     print(f"[COMPLEX QUERY ERROR] Universal date summary query failed: {e}")
 
         # 0.5 Status Alert Listing Queries ("show me completed alerts from noida", "at august 20, show me closed alerts from agra")
-        if any(st in msg_lower for st in ["closed", "completed", "resolved", "acknowledged", "ack", "pending", "active", "open"]) and not any(w in msg_lower for w in ["how many", "number of", "count of", "percent", "ratio", "slowest", "response time", "sla", "delay", "latency", "operator time"]):
-            if any(w in msg_lower for w in ["completed", "closed", "resolved"]):
+        if any(st in msg_lower for st in ["closed", "completed", "resolved", "unresolved", "acknowledged", "ack", "pending", "active", "open"]) and not any(w in msg_lower for w in ["how many", "number of", "count of", "percent", "ratio", "slowest", "response time", "sla", "delay", "latency", "operator time"]):
+            if "unresolved" in msg_lower:
+                target_status_sql = "(Status NOT LIKE '%Closed%' AND Status NOT LIKE '%Completed%')"
+                target_status_label = "Unresolved / Pending"
+            elif any(w in msg_lower for w in ["completed", "closed"]) or re.search(r'\bresolved\b', msg_lower):
                 target_status_sql = "(Status LIKE '%Closed%' OR Status LIKE '%Completed%')"
                 target_status_label = "Closed / Completed"
             elif any(w in msg_lower for w in ["acknowledged", "ack"]):

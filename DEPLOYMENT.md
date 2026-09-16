@@ -12,7 +12,7 @@ Create or update your `.env` file in `backend/.env`:
 
 ```env
 # Server Network Configuration
-PORT=8000
+PORT=8001
 HOST=0.0.0.0
 
 # Local LLM Serving (Ollama Self-Hosted)
