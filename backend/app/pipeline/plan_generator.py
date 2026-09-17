@@ -47,6 +47,10 @@ class PlanGenerator:
                 if isinstance(parsed, dict) and "tables_needed" in parsed:
                     # Enforce ALLOWED_TABLES on LLM plan output
                     parsed["tables_needed"] = [t for t in parsed.get("tables_needed", []) if t in config.ALLOWED_TABLES] or ["AlertsDetails"]
+                    # Branch concept guard: 'branch' or 'branches' maps to Area, not Zone
+                    if any(w in normalized_query.lower() for w in ["branch", "branches"]):
+                        if parsed.get("group_by") and "Zone" in parsed.get("group_by"):
+                            parsed["group_by"] = ["Area" if g == "Zone" else g for g in parsed["group_by"]]
                     return parsed, False
         except Exception as e:
             print(f"[PLAN GENERATOR WARNING] Ollama call offline/failed ({e}). Using deterministic plan builder.", flush=True)
@@ -63,6 +67,9 @@ class PlanGenerator:
         prompt_parts = [
             "You are a database query plan planner. Output ONLY strict JSON according to this schema:\n",
             "{\n  \"intent\": \"SELECT|SUMMARY|COUNT|AVG|SUM|MAX|MIN\",\n  \"tables_needed\": [\"table_name\"],\n  \"select_columns\": [\"col_name\"],\n  \"filters\": [{\"table\": \"table_name\", \"column\": \"col_name\", \"operator\": \"=\", \"value\": \"val\"}],\n  \"group_by\": [\"col_name\"] or null,\n  \"aggregation\": \"COUNT|AVG|SUM|MAX|MIN\" or null,\n  \"limit\": 50 or null\n}\n\n",
+            "CRITICAL DOMAIN RULES:\n",
+            "1. In AlertsDetails table, column Area represents Monitored Branch / Administrative Office (e.g. AO_NOIDA, AO_AGRA, AO_NORTH AND WEST DELHI). For questions asking about 'branch' or 'branches' (or specific branches like Noida, Agra, Delhi), set group_by or filters strictly on column Area.\n",
+            "2. Column Zone represents SBI LHO Command Circle (e.g. NEW DELHI). Use Zone only when LHO, Circle, or Zone is explicitly asked.\n\n",
             f"User Query: {query}\n",
             f"Resolved Intent: {intent}\n",
             f"Resolved Entities: {json.dumps(entities)}\n",
@@ -270,7 +277,7 @@ class PlanGenerator:
             aggregation = "COUNT"
             order_by = "TotalAlerts DESC"
             limit = 1 if "which" in query_lower or "highest" in query_lower or "top 1" in query_lower else 5
-            cand_order = ["area", "location", "zone"] if "branch" in query_lower else (["zone", "area", "location"] if ("lho" in query_lower or "zone" in query_lower) else ["area", "zone"])
+            cand_order = ["area", "location", "zone"] if ("branch" in query_lower or "branches" in query_lower) else (["zone", "area", "location"] if ("lho" in query_lower or "zone" in query_lower or "zones" in query_lower) else ["area", "zone"])
             for cand in cand_order:
                 for c in table_cols:
                     if c.lower() == cand:

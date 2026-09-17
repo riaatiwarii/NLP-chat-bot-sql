@@ -316,6 +316,39 @@ class DataService:
         if self.use_sql_server and self.engine:
             try:
                 with self.engine.connect() as conn:
+                    # 1. Today's Summary Breakdown
+                    today_q = """
+                        SELECT 
+                            TRIM(COALESCE(Area, Location)) as branch_name,
+                            COUNT(*) as total_alerts,
+                            SUM(CASE WHEN Status = 'Pending' THEN 1 ELSE 0 END) as pending_alerts,
+                            SUM(CASE WHEN Status = 'Closed' THEN 1 ELSE 0 END) as closed_alerts,
+                            SUM(CASE WHEN Status = 'Acknowledged' THEN 1 ELSE 0 END) as ack_alerts
+                        FROM AlertsDetails
+                        WHERE CAST(Datetime AS DATE) = CAST(GETDATE() AS DATE)
+                        GROUP BY TRIM(COALESCE(Area, Location))
+                        ORDER BY total_alerts DESC
+                    """
+                    today_rows = conn.execute(text(today_q)).mappings().all()
+                    today_tot_all = sum(r["total_alerts"] for r in today_rows) or 0
+                    
+                    today_breakdown = []
+                    for r in today_rows:
+                        pct = round((r["total_alerts"] / today_tot_all) * 100, 2) if today_tot_all else 0.0
+                        today_breakdown.append({
+                            "branch_name": r["branch_name"] or "Unassigned",
+                            "total_alerts": r["total_alerts"],
+                            "pending_alerts": r["pending_alerts"],
+                            "closed_alerts": r["closed_alerts"],
+                            "ack_alerts": r["ack_alerts"],
+                            "share_pct": pct
+                        })
+                    
+                    today_pending = sum(r["pending_alerts"] for r in today_rows) if today_rows else 0
+                    today_closed = sum(r["closed_alerts"] for r in today_rows) if today_rows else 0
+                    today_ack = sum(r["ack_alerts"] for r in today_rows) if today_rows else 0
+
+                    # 2. Overall All-Time Summary
                     q = """
                         SELECT 
                             TRIM(COALESCE(Area, Location)) as branch_name,
@@ -343,11 +376,20 @@ class DataService:
                         })
                         
                     tot_alerts = conn.execute(text("SELECT COUNT(*) FROM AlertsDetails")).scalar() or tot_all
-                    today_alerts = conn.execute(text("SELECT COUNT(*) FROM AlertsDetails WHERE CAST(Datetime AS DATE) = CAST(GETDATE() AS DATE)")).scalar() or 0
-                    
+                    today_date_obj = conn.execute(text("SELECT CAST(GETDATE() AS DATE)")).scalar()
+                    try:
+                        today_date_str = today_date_obj.strftime("%d %b %Y") if today_date_obj else datetime.now().strftime("%d %b %Y")
+                    except Exception:
+                        today_date_str = str(today_date_obj) if today_date_obj else datetime.now().strftime("%d %b %Y")
+
                     return {
                         "total_alerts_count": tot_alerts,
-                        "alerts_today_count": today_alerts,
+                        "alerts_today_count": today_tot_all,
+                        "today_date_str": today_date_str,
+                        "today_pending_count": today_pending,
+                        "today_closed_count": today_closed,
+                        "today_ack_count": today_ack,
+                        "today_breakdown": today_breakdown,
                         "breakdown": breakdown_list
                     }
             except Exception as e:

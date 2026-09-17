@@ -45,6 +45,10 @@ class SQLGenerator:
         prompt_parts = [
             "### System Prompt:\n",
             "Generate ONLY valid executable SQL query matching the query plan and database schema below. Do not wrap in markdown or commentary.\n\n",
+            "CRITICAL DOMAIN RULES:\n",
+            "1. In AlertsDetails table, column Area represents Monitored Branch / Administrative Office (e.g. AO_NOIDA, AO_AGRA, AO_NORTH AND WEST DELHI). For questions asking about 'branch' or 'branches' (or specific branches like Noida, Agra, Delhi), filter or group strictly on column Area.\n",
+            "2. Column Zone represents SBI LHO Command Circle (e.g. NEW DELHI). Use Zone only when LHO/Circle is explicitly asked.\n",
+            "3. For location text filters (Area or Zone), use LIKE '%<val>%' (e.g. Area LIKE '%NOIDA%') to match branch prefixes.\n\n",
             f"### Query Plan:\n{plan}\n\n",
             f"### Relevant Schema:\n{schema.get('tables', {})}\n\n"
         ]
@@ -163,6 +167,10 @@ class SQLGenerator:
                 tbl = primary_table # Force primary_table unless multi-table join is present
 
                 if col and val is not None and str(val).strip() != "":
+                    # Remap Location to Area if value is a known branch name (e.g., AO_NOIDA, Noida)
+                    if col == "Location" and any(b in str(val).upper() for b in ["NOIDA", "AGRA", "DELHI", "AO_"]):
+                        col = "Area"
+
                     col_ref = f"{tbl}.[{col}]"
                     if is_date_cast:
                         if op == "=":
@@ -173,7 +181,12 @@ class SQLGenerator:
                         where_parts.append(f"{col_ref} {op} {val}")
                     else:
                         safe_val = str(val).replace("'", "''")
-                        where_parts.append(f"{col_ref} {op} '{safe_val}'")
+                        if col in ["Area", "Zone", "Location"] and op == "=":
+                            # Clean up prefix for LIKE query (e.g. AO_NOIDA -> NOIDA)
+                            clean_like = safe_val.replace("AO_", "").strip()
+                            where_parts.append(f"{col_ref} LIKE '%{clean_like}%'")
+                        else:
+                            where_parts.append(f"{col_ref} {op} '{safe_val}'")
 
         if where_parts:
             sql += " WHERE " + " AND ".join(where_parts)

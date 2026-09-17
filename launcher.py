@@ -35,8 +35,23 @@ if __name__ == "__main__":
         from app.main import app
         
         import socket
-        port = int(os.getenv("PORT", "8001"))
+
+        def find_free_port(start_port=8001):
+            for p in range(start_port, start_port + 20):
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                    try:
+                        s.bind(("0.0.0.0", p))
+                        return p
+                    except OSError:
+                        continue
+            return start_port
+
+        default_port = int(os.getenv("PORT", "8001"))
+        port = find_free_port(default_port)
+        if port != default_port:
+            print(f"[PORT NOTICE] Port {default_port} is already in use. Auto-switching to available port {port}...", flush=True)
         print(f"Starting server on http://0.0.0.0:{port} ...", flush=True)
+        print(f"👉 Access UI in browser at: http://localhost:{port}/", flush=True)
         uvicorn.run(app, host="0.0.0.0", port=port)
     except KeyboardInterrupt:
         print("\n[INFO] Server stopped by user.", flush=True)

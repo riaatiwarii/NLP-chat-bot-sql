@@ -33,7 +33,7 @@ class Extractor:
 
         # 2. Identify candidate entity spans via regex & known dict matching
         # Status / Severity patterns
-        severity_matches = re.findall(r'\b(offline|online|active|open|closed|critical|high|medium|low|tampering|breach|panic)\b', text, re.IGNORECASE)
+        severity_matches = re.findall(r'\b(offline|online|active|open|closed|unresolved|pending|resolved|critical|high|medium|low|tampering|breach|panic)\b', text, re.IGNORECASE)
         for match in severity_matches:
             entity_spans.append({"span": match, "type": "status_severity"})
 

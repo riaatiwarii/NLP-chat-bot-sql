@@ -25,7 +25,7 @@ class Config:
         os.getenv("DATABASE_URL", "sqlite:///backend/app/db.json")
     )
     
-    # Target Database Table Filtering (Scoped strictly to 6 remaining allowed tables)
+    # Target Database Table Filtering (Scoped strictly to 6 confirmed allowed tables)
     ALLOWED_TABLES: list = [
         "AlertAttachment", "AlertsDetails", "Jurisdiction_mstr",
         "RawAttachments", "Sensor_Master", "Junction_mstr"

@@ -22,7 +22,8 @@ class PlanValidator:
 
         # Extract all referenced columns
         columns_ref = []
-        for f in plan.get("filters", []):
+        filters_list = plan.get("filters") or []
+        for f in filters_list:
             if isinstance(f, dict):
                 col = f.get("column")
                 tbl = f.get("table", tables_needed[0])

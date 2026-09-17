@@ -34,11 +34,12 @@ export default function FloatingWidget({ gatewayUrl = '', initialOpen = false, t
   };
 
   const suggestions = [
-    "List the LHOs",
     "Show today's dashboard summary",
+    "Tell me about alertID 93527",
     "Which branch has the highest number of alerts?",
-    "Which CCTV cameras are offline?",
-    "Show recent high severity alerts in Noida"
+    "Show recent high severity alerts in Noida",
+    "List the LHOs",
+    "Show unresolved alerts"
   ];
 
   const scrollToBottom = () => {

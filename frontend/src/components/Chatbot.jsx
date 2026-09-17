@@ -7,12 +7,11 @@ export default function Chatbot({ messages, onSendMessage, isTyping, ollamaActiv
 
   const suggestions = [
     "Show today's dashboard summary",
-    "Show incidents from Bhopal LHO",
-    "Which ones are still open?",
-    "Which CCTV cameras are offline?",
-    "Which operator handled the most incidents today?",
-    "Which branch has the highest false alert rate?",
-    "Show standard operating procedure for perimeter breach"
+    "Tell me about alertID 93527",
+    "Which branch has the highest number of alerts?",
+    "Show recent high severity alerts in Noida",
+    "List the LHOs",
+    "Show unresolved alerts"
   ];
 
   const scrollToBottom = () => {

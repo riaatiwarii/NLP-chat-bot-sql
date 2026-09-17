@@ -31,7 +31,10 @@ class SchemaEngine:
         """Loads sentence-transformers model for dense semantic embeddings."""
         try:
             print(f"[SCHEMA ENGINE] Loading semantic embedding model: '{self.model_name}'...")
-            self.embedder = SentenceTransformer(self.model_name)
+            try:
+                self.embedder = SentenceTransformer(self.model_name, local_files_only=True)
+            except Exception:
+                self.embedder = SentenceTransformer(self.model_name)
             print("[SCHEMA ENGINE] Semantic embedder loaded successfully.")
         except Exception as e:
             print(f"[SCHEMA ENGINE WARNING] Failed to load SentenceTransformer: {e}")

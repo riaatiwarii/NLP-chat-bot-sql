@@ -97,7 +97,18 @@ class PipelineOrchestrator:
             s = ds.get_dashboard_summary()
             breakdown = s.get("breakdown", [])
             tot_alerts = s.get("total_alerts_count", 0)
+            today_date = s.get("today_date_str", "Today")
+            today_cnt = s.get("alerts_today_count", 0)
+            today_pending = s.get("today_pending_count", 0)
+            today_closed = s.get("today_closed_count", 0)
+            today_bk = s.get("today_breakdown", [])
             
+            today_tbl = "| Monitored Branch / Area | Today's Alerts | Pending Alerts | Closed / Resolved | Share |\n|---|---|---|---|---|\n"
+            for item in today_bk:
+                today_tbl += f"| **{item['branch_name']}** | **{item['total_alerts']:,}** | {item['pending_alerts']:,} | {item['closed_alerts']:,} | {item['share_pct']}% |\n"
+            if not today_bk:
+                today_tbl += "| *No alerts registered today yet* | 0 | 0 | 0 | 0.0% |\n"
+
             tbl = "| Monitored Branch / Area | Total Alerts Registered | Pending Alerts | Closed / Resolved | Share |\n|---|---|---|---|---|\n"
             for item in breakdown:
                 tbl += f"| **{item['branch_name']}** | **{item['total_alerts']:,}** | {item['pending_alerts']:,} | {item['closed_alerts']:,} | {item['share_pct']}% |\n"
@@ -107,8 +118,15 @@ class PipelineOrchestrator:
             top_pct = breakdown[0]['share_pct'] if breakdown else 0
             
             resp_text = (
+                f"## 📅 Today's Alert Telemetry Summary ({today_date})\n\n"
+                f"- **Registered Today:** `{today_cnt:,}` alerts\n"
+                f"- **Pending / Active:** `{today_pending:,}` alerts\n"
+                f"- **Closed / Resolved:** `{today_closed:,}` alerts\n\n"
+                f"### Today's Security Alerts Grouped by Monitored Branch / Area\n{today_tbl}\n"
+                f"---\n\n"
+                f"## 📊 All-Time System Telemetry Summary\n\n"
                 f"Alert breakdown grouped by **Monitored Branch / Area** (total **{tot_alerts:,} alerts** across **{len(breakdown)} categories**):\n\n"
-                f"### Security Alerts Grouped by Monitored Branch / Area\n{tbl}\n"
+                f"### All-Time Security Alerts Grouped by Monitored Branch / Area\n{tbl}\n"
                 f"### Operations Summary\n"
                 f"Highest category: **{top_name}** representing **{top_cnt:,} alerts** (`{top_pct}%` share of volume)."
             )
@@ -221,6 +239,7 @@ class PipelineOrchestrator:
             }
 
         # STAGE 13: Execute SQL
+        print(f"\n[GENERATED SQL LOG] Query: '{user_query}'\n>>> SQL: {sql_query}\n", flush=True)
         rows, column_names, total_count, exec_err = self.executor.execute(sql_query)
         if exec_err and attempts_count < config.MAX_SELF_CORRECTION_ATTEMPTS:
             # Try 1 more execution error self-repair retry
