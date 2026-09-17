@@ -47,13 +47,23 @@ class PlanGenerator:
                 if isinstance(parsed, dict) and "tables_needed" in parsed:
                     # Enforce ALLOWED_TABLES on LLM plan output
                     parsed["tables_needed"] = [t for t in parsed.get("tables_needed", []) if t in config.ALLOWED_TABLES] or ["AlertsDetails"]
-                    # Branch concept guard: 'branch' or 'branches' maps to Area, not Zone
-                    if any(w in normalized_query.lower() for w in ["branch", "branches"]):
-                        if parsed.get("group_by") and "Zone" in parsed.get("group_by"):
-                            parsed["group_by"] = ["Area" if g == "Zone" else g for g in parsed["group_by"]]
-                    # Ensure aggregation column TotalAlerts is present in select_columns for group_by plans
+                    # General Rule for SUMMARY Intent:
+                    # Unless an explicit multi-category breakdown (by branch/severity/type) is requested, SUMMARY intent defaults group_by = ["Status"]
+                    if parsed.get("intent") == "SUMMARY":
+                        q_low = normalized_query.lower()
+                        is_explicit_other_grouping = any(w in q_low for w in [
+                            "by branch", "by location", "by area", "by zone", "grouped by branch", "breakdown by branch",
+                            "breakdown by area", "breakdown by zone", "highest branch", "top branch", "which branch",
+                            "breakdown by severity", "breakdown by type", "highest number of alerts"
+                        ])
+                        if not is_explicit_other_grouping:
+                            parsed["group_by"] = ["Status"]
+                            parsed["select_columns"] = ["Status", "TotalAlerts"]
+
+                    # Ensure an aggregation column (TotalAlerts / Count) is present in select_columns for group_by plans
                     if parsed.get("group_by") and isinstance(parsed.get("select_columns"), list):
-                        if "TotalAlerts" not in parsed["select_columns"] and "COUNT(*)" not in parsed["select_columns"]:
+                        has_count_col = any(any(k in str(c).lower() for k in ["total", "count", "sum", "avg", "max", "min"]) for c in parsed["select_columns"])
+                        if not has_count_col:
                             parsed["select_columns"].append("TotalAlerts")
                     return parsed, False
         except Exception as e:
@@ -300,15 +310,14 @@ class PlanGenerator:
             aggregation = "COUNT"
             limit = None # Aggregated summaries stay uncapped
 
-            if "status" in query_lower and "status" not in filtered_cols:
-                status_cols = [c for c in table_cols if c.lower() == "status"]
-                if status_cols:
-                    group_by = status_cols
-            elif "severity" in query_lower and "severity" not in filtered_cols:
-                sev_cols = [c for c in table_cols if c.lower() == "severity"]
-                if sev_cols:
-                    group_by = sev_cols
-            elif any(k in query_lower for k in ["location", "branch", "area", "zone"]):
+            # General Rule for SUMMARY Intent:
+            # Unless an explicit multi-category breakdown (by branch/severity/type) is requested, SUMMARY intent defaults group_by = ["Status"]
+            is_explicit_other_grouping = any(w in query_lower for w in [
+                "by branch", "by location", "by area", "by zone", "grouped by branch", "breakdown by branch",
+                "breakdown by area", "breakdown by zone", "highest branch", "top branch", "which branch",
+                "breakdown by severity", "breakdown by type", "highest number of alerts"
+            ])
+            if is_explicit_other_grouping:
                 cand_order = ["area", "location", "zone"] if "branch" in query_lower else (["zone", "area", "location"] if ("lho" in query_lower or "zone" in query_lower) else ["area", "zone"])
                 for cand in cand_order:
                     for c in table_cols:
@@ -317,15 +326,9 @@ class PlanGenerator:
                             break
                     if group_by:
                         break
-
-            if not group_by:
-                candidate_dims = []
-                for dim_keyword in ["location", "zone", "area", "status", "severity", "alerttype"]:
-                    for c in table_cols:
-                        if c.lower() == dim_keyword and c.lower() not in filtered_cols and c not in candidate_dims:
-                            candidate_dims.append(c)
-                            break
-                group_by = candidate_dims[:3] if candidate_dims else None
+            else:
+                status_cols = [c for c in table_cols if c.lower() == "status"]
+                group_by = status_cols if status_cols else ["Status"]
 
         if intent == "SUMMARY" and group_by:
             select_columns = list(group_by) + ["TotalAlerts"]

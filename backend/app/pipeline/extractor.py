@@ -9,7 +9,8 @@ class Extractor:
     """
     def __init__(self, known_locations: list[str] = None):
         self.known_locations = set(loc.lower() for loc in (known_locations or [
-            "bhopal", "noida", "mumbai", "delhi", "new delhi", "nariman point", "pune", "ahmedabad", "chennai"
+            "bhopal", "noida", "agra", "delhi", "new delhi", "nariman point", "pune", "ahmedabad", "chennai",
+            "ao_noida", "ao_agra", "ao_north and west delhi", "north and west delhi", "lucknow", "kanpur"
         ]))
 
     def extract(self, query: str) -> dict:

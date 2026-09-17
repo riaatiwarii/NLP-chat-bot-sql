@@ -13,7 +13,7 @@ __pycache__/
 htmlcov/
 .mypy_cache/
 .ruff_cache/
-
+backend\app\data\feedback_dataset.jsonl
 # Virtual Environments
 .venv/
 venv/
