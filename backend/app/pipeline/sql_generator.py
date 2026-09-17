@@ -48,7 +48,8 @@ class SQLGenerator:
             "CRITICAL DOMAIN RULES:\n",
             "1. In AlertsDetails table, column Area represents Monitored Branch / Administrative Office (e.g. AO_NOIDA, AO_AGRA, AO_NORTH AND WEST DELHI). For questions asking about 'branch' or 'branches' (or specific branches like Noida, Agra, Delhi), filter or group strictly on column Area.\n",
             "2. Column Zone represents SBI LHO Command Circle (e.g. NEW DELHI). Use Zone only when LHO/Circle is explicitly asked.\n",
-            "3. For location text filters (Area or Zone), use LIKE '%<val>%' (e.g. Area LIKE '%NOIDA%') to match branch prefixes.\n\n",
+            "3. For location text filters (Area or Zone), use LIKE '%<val>%' (e.g. Area LIKE '%NOIDA%') to match branch prefixes.\n",
+            "4. For breakdown or summary queries with GROUP BY, ALWAYS include COUNT(*) AS TotalAlerts alongside the grouped column(s) (e.g. SELECT Area, COUNT(*) AS TotalAlerts FROM AlertsDetails GROUP BY Area ORDER BY TotalAlerts DESC). Never omit COUNT(*) from SELECT in GROUP BY queries.\n\n",
             f"### Query Plan:\n{plan}\n\n",
             f"### Relevant Schema:\n{schema.get('tables', {})}\n\n"
         ]

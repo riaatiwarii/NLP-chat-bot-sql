@@ -51,6 +51,10 @@ class PlanGenerator:
                     if any(w in normalized_query.lower() for w in ["branch", "branches"]):
                         if parsed.get("group_by") and "Zone" in parsed.get("group_by"):
                             parsed["group_by"] = ["Area" if g == "Zone" else g for g in parsed["group_by"]]
+                    # Ensure aggregation column TotalAlerts is present in select_columns for group_by plans
+                    if parsed.get("group_by") and isinstance(parsed.get("select_columns"), list):
+                        if "TotalAlerts" not in parsed["select_columns"] and "COUNT(*)" not in parsed["select_columns"]:
+                            parsed["select_columns"].append("TotalAlerts")
                     return parsed, False
         except Exception as e:
             print(f"[PLAN GENERATOR WARNING] Ollama call offline/failed ({e}). Using deterministic plan builder.", flush=True)
