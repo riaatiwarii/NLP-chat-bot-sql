@@ -26,7 +26,7 @@ class DataService:
         # Fetch granular database coordinates
         db_user = os.getenv("DB_USER", "sa")
         password = os.getenv("DB_PASSWORD", "")
-        host = os.getenv("DB_HOST", "198.38.87.117")
+        host = os.getenv("DB_HOST", "localhost")
         port = os.getenv("DB_PORT", "1433")
         dbname = os.getenv("DB_NAME", "OmniDash_CMS")
 

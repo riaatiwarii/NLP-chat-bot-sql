@@ -28,6 +28,12 @@ class Config:
         os.getenv("DATABASE_URL", "")
     )
     
+    # CORS: comma-separated list of exact allowed origins (e.g. the bank portal domains
+    # embedding the plugin widget). No wildcard default - an empty list means the browser
+    # blocks all cross-origin requests until this is explicitly configured.
+    _raw_origins: str = os.getenv("ALLOWED_ORIGINS", "")
+    ALLOWED_ORIGINS: list = [o.strip() for o in _raw_origins.split(",") if o.strip()]
+
     # Target Database Table Filtering (Scoped strictly to 6 confirmed allowed tables)
     ALLOWED_TABLES: list = [
         "vw_AlertReporting", "AlertAttachment", "AlertsDetails", "Jurisdiction_mstr",

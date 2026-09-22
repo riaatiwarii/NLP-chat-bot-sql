@@ -299,12 +299,16 @@ class PipelineOrchestrator:
                 sql_query = gen_res
             rows, column_names, total_count, exec_err = self.executor.execute(sql_query, sql_params)
 
-        # STAGE 13.5: Attachment Fetching (Disabled per user request)
+        # STAGE 13.5: Attachment Fetching - when the plan filters on a specific AlertID,
+        # look up any attachments (photos/video/docs) for that alert so the response can
+        # link to them via the existing /api/attachment/{id} endpoint.
         select_cols = plan.get("select_columns") or []
+        attachments = self._fetch_attachments_for_plan(plan)
 
         # STAGE 14: Natural Language Response Synthesis
         response_text = self.response_synthesizer.synthesize(
-            user_query, rows, column_names, total_count=total_count, select_columns=select_cols, plan=plan
+            user_query, rows, column_names, total_count=total_count, select_columns=select_cols, plan=plan,
+            attachments=attachments
         )
 
         # STAGE 15: Logging & Feedback Capture
@@ -323,6 +327,51 @@ class PipelineOrchestrator:
             "session_id": sid,
             "rows_count": len(rows)
         }
+
+    def _fetch_attachments_for_plan(self, plan: dict) -> list[dict]:
+        """
+        If the plan filters on a specific AlertID, look up attachment metadata (not the
+        base64 blob itself - that's fetched lazily via GET /api/attachment/{id} when a
+        link is clicked) from both RawAttachments and AlertAttachment.
+        """
+        if not self.db_engine or not isinstance(plan, dict):
+            return []
+
+        alert_id = None
+        for f in plan.get("filters") or []:
+            if isinstance(f, dict) and (f.get("column") or "").lower() in ["alertid", "id"]:
+                alert_id = f.get("value")
+                break
+        if not alert_id:
+            return []
+
+        attachments = []
+        try:
+            from sqlalchemy import text
+            with self.db_engine.connect() as conn:
+                try:
+                    res = conn.execute(
+                        text("SELECT id, FileName, FileType FROM RawAttachments WHERE AlertId = :aid"),
+                        {"aid": alert_id}
+                    ).fetchall()
+                    for r in res:
+                        attachments.append({"id": r[0], "file_name": r[1], "file_type": r[2]})
+                except Exception as e:
+                    print(f"[ORCHESTRATOR] RawAttachments lookup skipped: {e}", flush=True)
+
+                try:
+                    res = conn.execute(
+                        text("SELECT id, FileName, ContentType FROM AlertAttachment WHERE AlertId = :aid"),
+                        {"aid": str(alert_id)}
+                    ).fetchall()
+                    for r in res:
+                        attachments.append({"id": r[0], "file_name": r[1], "file_type": r[2]})
+                except Exception as e:
+                    print(f"[ORCHESTRATOR] AlertAttachment lookup skipped: {e}", flush=True)
+        except Exception as e:
+            print(f"[ORCHESTRATOR WARNING] Attachment fetch failed: {e}", flush=True)
+
+        return attachments
 
     def _init_redis(self):
         if not config.REDIS_ENABLED:

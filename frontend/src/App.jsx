@@ -5,6 +5,14 @@ import Chatbot from './components/Chatbot';
 import Settings from './components/Settings';
 import FloatingWidget from './components/FloatingWidget';
 
+// API key sent as X-API-Key on every request to this app's own backend.
+// Set VITE_API_KEY at build time to match the backend's API_KEY; leave both unset in dev.
+const API_KEY = import.meta.env.VITE_API_KEY || '';
+const authHeaders = (extra = {}) => ({
+  ...extra,
+  ...(API_KEY ? { 'X-API-Key': API_KEY } : {})
+});
+
 export default function App() {
   const [viewMode, setViewMode] = useState('dashboard'); // 'dashboard' or 'widget_preview'
   const [messages, setMessages] = useState([]);
@@ -26,7 +34,7 @@ export default function App() {
 
   const fetchDashboard = async () => {
     try {
-      const response = await fetch('/api/dashboard');
+      const response = await fetch('/api/dashboard', { headers: authHeaders() });
       if (response.ok) {
         const data = await response.json();
         setDashboardData(data);
@@ -38,7 +46,7 @@ export default function App() {
 
   const fetchHealth = async (isInitial = false) => {
     try {
-      const response = await fetch('/api/health');
+      const response = await fetch('/api/health', { headers: authHeaders() });
       if (response.ok) {
         const data = await response.json();
         setHealthData(data);
@@ -77,7 +85,7 @@ export default function App() {
     try {
       const response = await fetch('/api/chat', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: authHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify({
           message: text,
           session_id: sessionId,

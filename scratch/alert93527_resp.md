@@ -1,5 +1,0 @@
-Found 1 matching record(s).
-
-| AlertID | AlertType | AlertSubtype | Branch | LHOCircle | Status | Severity | Datetime | Source | CloseTime | Remarks | AlertOccuranceTime | NearestCamera | Attachments |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 93527 | VMS | Activity Detection | AO_NORTH AND WEST DELHI | NEW DELHI | Closed | High | 28 Jul 2026, 11:21 AM | CP PLUS | 28 Jul 2026, 09:45 PM | 12-08-2026 17:18:35 Test Remarks<br/>12-08-2026 17:19:33 Test Remarks<br/>12-08-2026 17:22:52 Test Remarks<br/>13-08-2026 12:01:30 Test Remarks Added<br/>12-09-2026 19:03:09 Test Remarks Added<br/>12-09-2026 19:35:09 Test Remarks Added | 28 Jul 2026, 11:21 AM | 05 | <a href="/api/attachment/1" target="_blank" rel="noopener noreferrer"><img src="/api/attachment/1" alt="Activity Detection.png" style="max-width:140px; max-height:90px; border-radius:4px; display:block; margin:2px 0;" /><span style="text-decoration:underline; font-size:12px;">🖼️ Activity Detection.png</span></a> |

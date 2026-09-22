@@ -15,7 +15,7 @@ def inspect_database():
     # Read granular connection parameters
     db_user = os.getenv("DB_USER", "sa")
     password = os.getenv("DB_PASSWORD", "YOUR_PASSWORD")
-    host = os.getenv("DB_HOST", "198.38.87.117")
+    host = os.getenv("DB_HOST", "localhost")
     port = os.getenv("DB_PORT", "1433")
     dbname = os.getenv("DB_NAME", "OmniDash_CMS")
 
@@ -89,7 +89,7 @@ def inspect_database():
         print(f"\n[ERROR] Connection failed: {e}")
         print("Please check: ")
         print("1. If your password is correct (any '@' characters are now handled automatically).")
-        print("2. If the SQL Server host '198.38.87.117' is reachable and port 1433 is open.")
+        print(f"2. If the SQL Server host '{host}' is reachable and port {port} is open.")
         print("3. If 'SQL Server Authentication' is enabled on the server.")
 
 if __name__ == "__main__":

@@ -17,7 +17,8 @@ class ResponseSynthesizer:
         ]
 
     def synthesize(
-        self, user_question: str, rows: list[dict], column_names: list[str], total_count: int = None, select_columns: list[str] = None, plan: dict = None
+        self, user_question: str, rows: list[dict], column_names: list[str], total_count: int = None,
+        select_columns: list[str] = None, plan: dict = None, attachments: list[dict] = None
     ) -> str:
         """
         Synthesizes user-friendly answers from database query results.
@@ -141,10 +142,38 @@ class ResponseSynthesizer:
         if cleaned_summary and header_msg and cleaned_summary != header_msg and tot_matching > len(rows) and not has_agg:
             cleaned_summary = f"{header_msg}\n\n{cleaned_summary}"
 
-        if not cleaned_summary or cleaned_summary == header_msg:
-            return f"{header_msg}\n\n{table_md}" if header_msg else table_md
+        attachments_md = self._format_attachments_section(attachments)
 
-        return f"{cleaned_summary}\n\n{table_md}"
+        if not cleaned_summary or cleaned_summary == header_msg:
+            body = f"{header_msg}\n\n{table_md}" if header_msg else table_md
+        else:
+            body = f"{cleaned_summary}\n\n{table_md}"
+
+        return f"{body}\n\n{attachments_md}" if attachments_md else body
+
+    def _format_attachments_section(self, attachments: list[dict]) -> str:
+        """
+        Renders clickable attachment links (photos/video/docs) for a specific alert.
+        Links point at GET /api/attachment/{id}, which decodes the base64-stored file
+        from RawAttachments/AlertAttachment and serves it with the right content type.
+        The frontend chat renderer already turns markdown [text](url) into a clickable
+        link that opens in a new tab - no frontend change needed.
+        """
+        if not attachments:
+            return ""
+        lines = ["### 📎 Attachments"]
+        for a in attachments:
+            att_id = a.get("id")
+            try:
+                att_id = int(att_id)
+            except (TypeError, ValueError):
+                pass
+            file_name = a.get("file_name") or f"attachment_{att_id}"
+            file_type = str(a.get("file_type") or "").lower()
+            is_image = any(ext in file_type for ext in ["jpg", "jpeg", "png", "gif", "bmp"])
+            icon = "🖼️" if is_image else ("🎥" if "mp4" in file_type or "video" in file_type else "📄")
+            lines.append(f"- {icon} [{file_name}](/api/attachment/{att_id})")
+        return "\n".join(lines)
 
     def _build_dynamic_summary(self, question: str, rows: list[dict], default_header: str, plan: dict = None) -> str:
         if not rows:

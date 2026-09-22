@@ -12,10 +12,7 @@ if exist "%~dp0dist\SbiCmsGateway\.env" (
     echo [CONFIG] Loading custom environment configuration from .env file...
     for /f "tokens=*" %%i in ('type "%~dp0dist\SbiCmsGateway\.env"') do set "%%i"
 ) else (
-    echo [CONFIG] Using database settings:
-    echo          DB_HOST = 198.38.87.117:1433
-    echo          DB_NAME = OmniDash_CMS
-    echo          OLLAMA  = http://localhost:11434
+    echo [CONFIG] WARNING: No .env file found - create one with DB_HOST, DB_NAME, DB_USER, DB_PASSWORD, OLLAMA_HOST before running.
 )
 
 echo.

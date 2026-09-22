@@ -18,8 +18,8 @@ A domain-specific **Natural Language Processing (NLP) & Machine Learning Text-to
 * **Semantic Schema Linking (`all-MiniLM-L6-v2`)**: Computes dense vector Cosine Similarity to map user query tokens to target database tables/columns.
 * **Categorical Value Grounding**: Automatically grounds natural language terms (e.g. `"nariman point"`) to exact database string literals (e.g. `"SBI Nariman Point"`).
 * **Multi-Turn Context Resolution**: Remembers dialogue context across follow-up queries (e.g. *"Show incidents in Bhopal LHO"* → *"Are any of them critical?"*).
-* **Deterministic Rule-Based Pipeline**: Primary query engine works without LLM dependency.
-* **LLM Enhancement**: Ollama LLM provides reasoning for unseen phrasings (optional enhancement).
+* **LLM-Primary Query Planning**: A local Ollama LLM (`qwen2.5-coder:7b`) is the primary engine that interprets the user's question and produces a structured query plan, grounded with live schema and real sample column values plus few-shot examples.
+* **Deterministic Safety Layer**: Every LLM-generated plan is restricted to approved tables/columns, has its filter values cross-checked against the pipeline's own value-resolution cascade, and is converted to parameterized SQL by non-LLM code - the LLM never writes or executes raw SQL. A keyword-based deterministic planner also exists as an emergency fallback for when Ollama is unreachable.
 * **Attachment Support**: Fetches and displays alert attachments (images/videos) from `RawAttachments` via base64 conversion.
 * **100% Shadow DOM Embeddable Plugin**: Includes a lightweight, style-isolated JavaScript floating widget that can be embedded into any external bank web portal or intranet with a single `<script>` tag.
 
@@ -45,7 +45,8 @@ A domain-specific **Natural Language Processing (NLP) & Machine Learning Text-to
 │            │                           │               │
 │            ▼                           ▼               │
 │  ┌──────────────────────────────────────────────────┐  │
-│  │ Pipeline Orchestrator (Rule-Based + Optional LLM) │  │
+│  │ Pipeline Orchestrator (LLM-Primary + Rule-Based   │  │
+│  │ Safety Layer & Emergency Fallback)                │  │
 │  └──────────────────────────┬───────────────────────┘  │
 │                             │                          │
 │                             ▼                          │
@@ -83,12 +84,20 @@ Create a `backend/.env` file (REQUIRED - no fallbacks):
 ```env
 DB_USER=sa
 DB_PASSWORD=YourPassword
-DB_HOST=198.38.87.117
+DB_HOST=your_sql_server_host
 DB_PORT=1433
 DB_NAME=OmniDash_CMS
 API_KEY=your_secure_api_key_here
 ALLOWED_ORIGINS=http://localhost:3000,http://localhost:8001
 ```
+
+If you set `API_KEY`, also create `frontend/.env` with the same value so the dashboard's own requests to the backend are authenticated:
+
+```env
+VITE_API_KEY=your_secure_api_key_here
+```
+
+(The embeddable widget instead takes its key per-embed via the `data-api-key` script attribute - see below.)
 
 ### 3. Run Development Servers
 
