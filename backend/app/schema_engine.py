@@ -58,7 +58,11 @@ class SchemaEngine:
         self.inferred_column_descriptions = {}
 
         try:
-            raw_table_names = inspector.get_table_names()
+            try:
+                view_names = inspector.get_view_names()
+            except Exception:
+                view_names = []
+            raw_table_names = inspector.get_table_names() + view_names
             # Strictly restrict table introspection to ALLOWED_TABLES
             allowed_set = set(config.ALLOWED_TABLES)
             table_names = [t for t in raw_table_names if t in allowed_set]
@@ -69,6 +73,7 @@ class SchemaEngine:
             return {}
 
         is_small_schema = len(table_names) <= 30
+        priority_tables = ["AlertsDetails", "vw_AlertReporting", "AlertAttachment", "RawAttachments", "Jurisdiction_mstr", "Junction_mstr", "Sensor_Master"]
 
         with self.engine.connect() as conn:
             for table_name in table_names:

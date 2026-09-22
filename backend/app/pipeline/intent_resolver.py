@@ -20,20 +20,36 @@ class IntentResolver:
 
         import re
 
-        # 0. Check summary / aggregate count phrase synonyms
+        # 0. Check DISTINCT intent ("type of alerts", "what alert types exist", "list branches", etc.)
+        if any(p in query_lower for p in ["type of alert", "types of alert", "type of alerts", "types of alerts", "alert type", "alert types", "what alert type", "which alert type", "list alert type", "show alert type"]) or \
+           re.search(r'\b(?:list|show|get|view)\s+(?:me\s+)?(?:the\s+)?(?:lhos?|branch(?:es)?|zone[s]?|jurisdiction[s]?)\b', query_lower):
+            if not any(k in query_lower for k in ["summary", "breakdown", "how many", "count of", "total", "distribution", "highest", "lowest", "least", "most", "by"]):
+                return "SELECT_DISTINCT"
+
+        # 0.1 Check Ranking queries ("which branch has lowest alerts", "which alert type occurs least", "most alerts", etc.)
+        if any(k in query_lower for k in ["highest", "lowest", "least", "most", "fewest", "smallest", "maximum", "minimum", "top "]):
+            return "SUMMARY"
+
+        # 0.2 Check "by [dimension]" queries ("alerts by their status", "alerts by branch", "by severity", "branch wise")
+        if re.search(r'\b(?:by\s+(?:their\s+)?(?:status|severity|branch|area|type|alert\s*type|lho|zone)|(?:status|severity|branch|area|type|alert\s*type|lho|zone)\s*(?:wise|breakdown|summary))\b', query_lower):
+            return "SUMMARY"
+
+        # 0.3 Check count / quantity phrases (exclude rankings and summaries)
+        if any(k in query_lower for k in ["how many", "count of", "total number of", "total number", "how much", "count"]):
+            if not any(k in query_lower for k in ["summary", "breakdown", "distribution", "highest", "most", "top", "lowest", "least", "fewest", "min", "max", "which", "by"]):
+                return "COUNT"
+
+        # Check summary / aggregate count phrase synonyms
         if any(p in query_lower for p in [
             "total alert summary", "count of total alerts", "count of alerts",
-            "total alerts", "summary of alerts", "alert summary", "total alert count"
+            "total alerts", "summary of alerts", "alert summary", "total alert count",
+            "breakdown", "distribution"
         ]):
             return "SUMMARY"
 
-        # Check distinct listing intent
-        if re.search(r'\b(?:list\s+the\s+|list\s+)?(?:lho|lhos|branch|branches|zone|zones|jurisdiction|jurisdictions)\b', query_lower):
-            if not any(k in query_lower for k in ["alert", "alerts", "count", "how many"]):
-                return "SELECT_DISTINCT"
-
-        # 1. Exact phrase match with word boundaries
-        for phrase, canonical in self.vocab_map.items():
+        # 1. Exact phrase match with word boundaries (sorted by length descending to match multi-word phrases first)
+        sorted_vocab = sorted(self.vocab_map.items(), key=lambda x: len(x[0]), reverse=True)
+        for phrase, canonical in sorted_vocab:
             if re.search(r'\b' + re.escape(phrase) + r'\b', query_lower):
                 return canonical
 

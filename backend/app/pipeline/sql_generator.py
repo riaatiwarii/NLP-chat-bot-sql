@@ -1,55 +1,63 @@
 import re
 import requests
 from app.config import config
+from app.pipeline.sql_ident import (
+    bracket,
+    qualify,
+    resolve_allowed_column,
+    resolve_allowed_table,
+    resolve_limit,
+    resolve_operator,
+    resolve_order_dir,
+)
 
 class SQLGenerator:
     """
     Stage 9: SQL Generation
-    Converts validated JSON query plan + relevant schema subset into valid SQL query text.
-    Calls local Ollama model (sqlcoder:15b or qwen2.5-coder) or uses deterministic SQL builder fallback.
+
+    Executable SQL is always built from the validated JSON plan with:
+    - bound parameters for every filter value
+    - table/column names resolved against ALLOWED_TABLES + introspected columns
+
+    Ollama may propose SQL for unseen phrasings; that text is never executed.
     """
     def __init__(self):
         self.ollama_host = config.OLLAMA_HOST
         self.ollama_model = config.OLLAMA_MODEL
 
-    def generate_sql(self, validated_plan: dict, schema_subset: dict, retry_error: str = None) -> str:
-        """
-        Generates SQL text.
-        """
-        prompt = self._build_prompt(validated_plan, schema_subset, retry_error)
+    def generate_sql(self, validated_plan: dict, schema_subset: dict, retry_error: str = None) -> tuple[str, dict, bool]:
+        if getattr(config, 'USE_LLM_SQL_DRAFT', False):
+            try:
+                resp = requests.post(
+                    f"{self.ollama_host}/api/generate",
+                    json={
+                        "model": self.ollama_model,
+                        "prompt": self._build_prompt(validated_plan, schema_subset, retry_error),
+                        "stream": False,
+                        "options": {"temperature": 0.1}
+                    },
+                    timeout=config.OLLAMA_TIMEOUT
+                )
+                if resp.status_code == 200:
+                    draft = self._extract_sql(resp.json().get("response", ""))
+                    if draft:
+                        print(f"[SQL GENERATOR] LLM SQL draft ignored for execution (not parameterized):\n{draft}", flush=True)
+            except Exception as e:
+                print(f"[SQL GENERATOR INFO] Ollama SQL draft skipped ({e}).", flush=True)
 
-        try:
-            resp = requests.post(
-                f"{self.ollama_host}/api/generate",
-                json={
-                    "model": self.ollama_model,
-                    "prompt": prompt,
-                    "stream": False,
-                    "options": {"temperature": 0.1}
-                },
-                timeout=config.OLLAMA_TIMEOUT
-            )
-            if resp.status_code == 200:
-                raw_text = resp.json().get("response", "")
-                sql = self._extract_sql(raw_text)
-                if sql:
-                    return sql, False
-        except Exception as e:
-            print(f"[SQL GENERATOR WARNING] Ollama call offline/failed ({e}). Using deterministic SQL synthesis.", flush=True)
-
-        # Fallback Deterministic SQL Builder from JSON Plan
-        sql = self._deterministic_sql_builder(validated_plan, schema_subset)
-        return sql, True
+        sql, params = self._deterministic_sql_builder(validated_plan, schema_subset)
+        print(f"[SQL GENERATOR] Generated SQL: {sql}")
+        print(f"[SQL GENERATOR] Generated params: {params}")
+        return sql, params, True
 
     def _build_prompt(self, plan: dict, schema: dict, retry_error: str) -> str:
         prompt_parts = [
             "### System Prompt:\n",
             "Generate ONLY valid executable SQL query matching the query plan and database schema below. Do not wrap in markdown or commentary.\n\n",
             "CRITICAL DOMAIN RULES:\n",
-            "1. In AlertsDetails table, column Area represents Monitored Branch / Administrative Office (e.g. AO_NOIDA, AO_AGRA, AO_NORTH AND WEST DELHI). For questions asking about 'branch' or 'branches' (or specific branches like Noida, Agra, Delhi), filter or group strictly on column Area.\n",
-            "2. Column Zone represents SBI LHO Command Circle (e.g. NEW DELHI). Use Zone only when LHO/Circle is explicitly asked.\n",
-            "3. For location text filters (Area or Zone), use LIKE '%<val>%' (e.g. Area LIKE '%NOIDA%') to match branch prefixes.\n",
-            "4. For breakdown or summary queries with GROUP BY, ALWAYS include COUNT(*) AS TotalAlerts alongside the grouped column(s) (e.g. SELECT Area, COUNT(*) AS TotalAlerts FROM AlertsDetails GROUP BY Area ORDER BY TotalAlerts DESC). Never omit COUNT(*) from SELECT in GROUP BY queries.\n\n",
+            "1. Primary alert table is vw_AlertReporting (Branch, LHOCircle) or AlertsDetails (Area, Zone).\n",
+            "2. For location text filters, use LIKE with a bound parameter (never concatenate user text).\n",
+            "3. For GROUP BY summaries always include COUNT(*) AS TotalAlerts.\n\n",
             f"### Query Plan:\n{plan}\n\n",
             f"### Relevant Schema:\n{schema.get('tables', {})}\n\n"
         ]
@@ -57,7 +65,6 @@ class SQLGenerator:
             prompt_parts.append(f"### Join Relationships:\n{schema.get('join_paths')}\n\n")
         if retry_error:
             prompt_parts.append(f"### Previous Error to Fix:\n{retry_error}\n\n")
-
         prompt_parts.append("### SQL Query:\n")
         return "".join(prompt_parts)
 
@@ -65,143 +72,219 @@ class SQLGenerator:
         match = re.search(r'```sql\s*(.*?)\s*```', text, re.DOTALL | re.IGNORECASE)
         if match:
             return match.group(1).strip()
-        
-        # Strip generic markdown backticks
         clean = text.replace("```", "").strip()
         lines = [line for line in clean.split("\n") if line.strip() and not line.strip().startswith("--")]
         return " ".join(lines)
 
-    def _deterministic_sql_builder(self, plan: dict, schema_subset: dict = None) -> str:
-        intent = plan.get("intent", "SELECT").upper()
-        tables = plan.get("tables_needed", ["Incident_Data"])
+    def _table_columns(self, table: str, schema_subset: dict) -> list[str]:
+        tables = (schema_subset or {}).get("tables", {})
+        cols_info = tables.get(table, [])
+        return [c["name"] if isinstance(c, dict) else str(c) for c in cols_info]
+
+    def _bind(self, params: dict, value) -> str:
+        name = f"p{len(params)}"
+        params[name] = value
+        return f":{name}"
+
+    def _deterministic_sql_builder(self, plan: dict, schema_subset: dict = None) -> tuple[str, dict]:
+        intent = (plan.get("intent") or "SELECT").upper()
+        raw_tables = plan.get("tables_needed") or ["vw_AlertReporting"]
+        tables = [resolve_allowed_table(t) for t in raw_tables]
         primary_table = tables[0]
+        table_cols = self._table_columns(primary_table, schema_subset)
+        if not table_cols:
+            table_cols = list(config.DEFAULT_DISPLAY_COLUMNS)
 
-        # Get available column names for primary table from schema_subset if present
-        table_cols = []
-        if schema_subset and "tables" in schema_subset and primary_table in schema_subset["tables"]:
-            cols_info = schema_subset["tables"][primary_table]
-            table_cols = [c["name"] if isinstance(c, dict) else str(c) for c in cols_info]
+        params: dict = {}
+        group_by = plan.get("group_by") or []
+        select_cols = plan.get("select_columns") or []
+        limit = resolve_limit(plan.get("limit"))
+        group_by_is_date = bool(plan.get("group_by_is_date"))
 
-        group_by = plan.get("group_by")
-        select_cols = plan.get("select_columns")
-        limit = plan.get("limit")
-        select_clause = "*"
+        def gb_expr(col: str) -> str:
+            expr = qualify(primary_table, col)
+            return f"CAST({expr} AS DATE)" if group_by_is_date else f"RTRIM(LTRIM({expr}))"
 
-        if intent in ["SUMMARY", "GROUP_BY"] or group_by:
+        if intent == "COUNT_DISTINCT" or plan.get("aggregation") == "COUNT_DISTINCT":
+            # "how many <dimension>" = distinct value count of that column, never total row count.
+            dim_col = resolve_allowed_column(select_cols[0] if select_cols else table_cols[0], table_cols)
+            dim_expr = f"CAST({qualify(primary_table, dim_col)} AS DATE)" if group_by_is_date else qualify(primary_table, dim_col)
+            select_clause = f"COUNT(DISTINCT {dim_expr}) AS TotalAlerts"
+            limit = None
+            group_by = []
+        elif intent in ["SUMMARY", "GROUP_BY"] or group_by:
             if group_by:
-                gb_select = [f"RTRIM(LTRIM({primary_table}.[{g}])) AS [{g}]" for g in group_by]
+                resolved_gb = [resolve_allowed_column(g, table_cols) for g in group_by]
+                gb_select = [f"{gb_expr(g)} AS {bracket(g)}" for g in resolved_gb]
                 select_clause = f"{', '.join(gb_select)}, COUNT(*) AS TotalAlerts"
+                group_by = resolved_gb
             else:
-                select_clause = f"COUNT(*) AS TotalAlerts"
+                select_clause = "COUNT(*) AS TotalAlerts"
+                limit = None  # COUNT queries should not have LIMIT
         elif intent == "COUNT":
             select_clause = "COUNT(*) AS TotalAlerts"
+            limit = None  # COUNT queries should not have LIMIT
         elif intent in ["AVG", "SUM", "MAX", "MIN"]:
             target_col = None
             for c in table_cols:
                 clow = c.lower()
                 if any(k in clow for k in ["time", "duration", "latency", "count", "rate", "sla", "id"]):
-                    target_col = c
+                    target_col = resolve_allowed_column(c, table_cols)
                     break
             if not target_col and table_cols:
-                target_col = table_cols[0]
-            
-            col_expr = f"{primary_table}.[{target_col}]" if target_col else "1"
+                target_col = resolve_allowed_column(table_cols[0], table_cols)
+            col_expr = qualify(primary_table, target_col) if target_col else "1"
             select_clause = f"{intent}({col_expr})"
         elif select_cols:
             valid_qualified = []
             for sc in select_cols:
-                matched_name = next((tc for tc in table_cols if tc.lower() == sc.lower()), sc)
-                valid_qualified.append(f"{primary_table}.[{matched_name}]")
+                if str(sc).lower() in ["totalalerts", "count(*)", "count"]:
+                    valid_qualified.append("COUNT(*) AS TotalAlerts")
+                else:
+                    matched_name = resolve_allowed_column(sc, table_cols)
+                    valid_qualified.append(qualify(primary_table, matched_name))
             select_clause = ", ".join(valid_qualified)
+        else:
+            select_clause = "*"
 
         distinct = plan.get("distinct") or intent == "SELECT_DISTINCT"
         order_by = plan.get("order_by")
-
         distinct_clause = "DISTINCT " if distinct else ""
         top_clause = f"TOP {limit} " if limit else ""
 
+        where_parts = []
         if distinct:
-            if select_cols:
-                valid_sel = []
-                for sc in select_cols:
-                    matched_name = next((tc for tc in table_cols if tc.lower() == sc.lower()), sc)
-                    valid_sel.append(f"RTRIM(LTRIM({primary_table}.[{matched_name}])) AS [{matched_name}]")
-                select_clause = ", ".join(valid_sel)
-            else:
-                select_clause = f"RTRIM(LTRIM({primary_table}.[Zone])) AS [Zone]"
+            sel_col_name = resolve_allowed_column(select_cols[0] if select_cols else table_cols[0], table_cols)
+            select_clause = f"RTRIM(LTRIM({qualify(primary_table, sel_col_name)})) AS {bracket(sel_col_name)}"
+            empty_ph = self._bind(params, "")
+            where_parts.append(
+                f"{qualify(primary_table, sel_col_name)} IS NOT NULL AND RTRIM(LTRIM({qualify(primary_table, sel_col_name)})) != {empty_ph}"
+            )
 
         sql = f"SELECT {distinct_clause}{top_clause}{select_clause} FROM {primary_table}"
 
-        # Multi-table join handling: find common column or FK relationship
         if len(tables) > 1 and schema_subset:
             sec_table = tables[1]
-            sec_cols = []
-            if "tables" in schema_subset and sec_table in schema_subset["tables"]:
-                sec_cols = [c["name"] if isinstance(c, dict) else str(c) for c in schema_subset["tables"][sec_table]]
-            
-            # Find matching FK column name between tables
+            sec_cols = self._table_columns(sec_table, schema_subset)
             ignored_join_keys = ["systemname", "status", "area", "zone", "location", "createdby", "updatedby", "id", "guid"]
             common = [c for c in table_cols if c in sec_cols and c.lower() not in ignored_join_keys]
             if common:
-                join_col = common[0]
-                sql += f" JOIN {sec_table} ON {primary_table}.[{join_col}] = {sec_table}.[{join_col}]"
+                join_col = resolve_allowed_column(common[0], table_cols)
+                join_col_sec = resolve_allowed_column(join_col, sec_cols)
+                sql += f" JOIN {sec_table} ON {qualify(primary_table, join_col)} = {qualify(sec_table, join_col_sec)}"
 
-        # Build WHERE clause components from plan filters
-        where_parts = []
         raw_filters = plan.get("filters", [])
         if isinstance(raw_filters, dict):
-            for col, val in raw_filters.items():
-                if val is not None and str(val).strip() != "":
-                    if isinstance(val, (int, float)) or str(val).isdigit():
-                        where_parts.append(f"{primary_table}.[{col}] = {val}")
-                    else:
-                        safe_val = str(val).replace("'", "''")
-                        where_parts.append(f"{primary_table}.[{col}] = '{safe_val}'")
-        elif isinstance(raw_filters, list):
-            for f in raw_filters:
-                if not isinstance(f, dict):
-                    continue
-                col = f.get("column")
-                op = f.get("operator", "=")
-                val = f.get("value")
-                is_date_cast = f.get("is_date_cast", False)
-                tbl = primary_table # Force primary_table unless multi-table join is present
+            raw_filters = [{"column": k, "operator": "=", "value": v} for k, v in raw_filters.items()]
 
-                if col and val is not None and str(val).strip() != "":
-                    # Remap Location to Area if value is a known branch name (e.g., AO_NOIDA, Noida)
-                    if col == "Location" and any(b in str(val).upper() for b in ["NOIDA", "AGRA", "DELHI", "AO_"]):
-                        col = "Area"
+        # Deduplicate filters by column to prevent impossible conditions
+        seen_columns = set()
+        deduped_filters = []
+        for f in raw_filters or []:
+            col = f.get("column")
+            if col and col.lower() not in seen_columns:
+                seen_columns.add(col.lower())
+                deduped_filters.append(f)
+        
+        for f in deduped_filters:
+            if not isinstance(f, dict):
+                continue
+            col = f.get("column")
+            op = f.get("operator", "=")
+            val = f.get("value")
+            is_date_cast = f.get("is_date_cast", False)
+            if col is None or val is None or str(val).strip() == "":
+                continue
 
-                    col_ref = f"{tbl}.[{col}]"
-                    if is_date_cast:
-                        if op == "=":
-                            where_parts.append(f"CAST({col_ref} AS DATE) = '{val}'")
-                        else:
-                            where_parts.append(f"CAST({col_ref} AS DATE) {op} '{val}'")
-                    elif isinstance(val, (int, float)) or (isinstance(val, str) and val.isdigit()):
-                        where_parts.append(f"{col_ref} {op} {val}")
-                    else:
-                        safe_val = str(val).replace("'", "''")
-                        if col in ["Area", "Zone", "Location"] and op == "=":
-                            # Clean up prefix for LIKE query (e.g. AO_NOIDA -> NOIDA)
-                            clean_like = safe_val.replace("AO_", "").strip()
-                            where_parts.append(f"{col_ref} LIKE '%{clean_like}%'")
-                        else:
-                            where_parts.append(f"{col_ref} {op} '{safe_val}'")
+            if primary_table == "vw_AlertReporting":
+                if col.lower() in ["area", "location"]:
+                    col = "Branch"
+                elif col.lower() in ["zone", "lho"]:
+                    col = "LHOCircle"
+            elif col == "Location" and any(b in str(val).upper() for b in ["NOIDA", "AGRA", "DELHI", "AO_"]):
+                col = "Area"
+
+            col = resolve_allowed_column(col, table_cols)
+            col_ref = qualify(primary_table, col)
+
+            if is_date_cast:
+                from datetime import datetime, timedelta
+                val_clean = str(f.get("start_date") or val).strip()
+                end_clean = str(f.get("end_date") or "").strip()
+                try:
+                    dt_obj = datetime.strptime(val_clean[:10], "%Y-%m-%d")
+                    start_str = dt_obj.strftime("%Y-%m-%d 00:00:00")
+                except Exception:
+                    start_str = f"{val_clean} 00:00:00"
+
+                if end_clean:
+                    try:
+                        dt_end_obj = datetime.strptime(end_clean[:10], "%Y-%m-%d")
+                        end_str = dt_end_obj.strftime("%Y-%m-%d 00:00:00")
+                    except Exception:
+                        end_str = f"{end_clean} 00:00:00"
+                else:
+                    try:
+                        next_dt = dt_obj + timedelta(days=1)
+                        end_str = next_dt.strftime("%Y-%m-%d 00:00:00")
+                    except Exception:
+                        end_str = f"{val_clean} 23:59:59"
+
+                ph_start = self._bind(params, start_str)
+                ph_end = self._bind(params, end_str)
+
+                # Check both Datetime and AlertOccuranceTime columns if available
+                has_occur_col = any(c.lower() in ["alertoccurancetime", "alertoccurance_time", "occurancetime"] for c in table_cols)
+                if col.lower() in ["datetime", "createdtime"] and has_occur_col:
+                    occur_col = next(c for c in table_cols if c.lower() in ["alertoccurancetime", "alertoccurance_time", "occurancetime"])
+                    col_alt = qualify(primary_table, occur_col)
+                    where_parts.append(f"(({col_ref} >= {ph_start} AND {col_ref} < {ph_end}) OR ({col_alt} >= {ph_start} AND {col_alt} < {ph_end}))")
+                else:
+                    where_parts.append(f"({col_ref} >= {ph_start} AND {col_ref} < {ph_end})")
+            elif col in ["Area", "Branch", "Zone", "LHOCircle", "Location"] and op == "=":
+                clean_like = str(val).replace("AO_", "").strip().upper()
+                ph = self._bind(params, f"%{clean_like}%")
+                where_parts.append(f"{col_ref} LIKE {ph}")
+            else:
+                op_clean = resolve_operator(op)
+                bind_val = int(val) if isinstance(val, str) and val.isdigit() else val
+                ph = self._bind(params, bind_val)
+                where_parts.append(f"{col_ref} {op_clean} {ph}")
+
+        # Ensure dimension columns are NOT NULL for ranking queries (e.g. "Which branch has the highest")
+        if group_by and limit == 1:
+            for g in group_by:
+                not_null_expr = f"{qualify(primary_table, g)} IS NOT NULL"
+                if not_null_expr not in where_parts:
+                    where_parts.append(not_null_expr)
+
+        if intent == "COUNT_DISTINCT" or plan.get("aggregation") == "COUNT_DISTINCT":
+            dim_col_ref = qualify(primary_table, resolve_allowed_column(select_cols[0] if select_cols else table_cols[0], table_cols))
+            not_null_expr = f"{dim_col_ref} IS NOT NULL"
+            if not_null_expr not in where_parts:
+                where_parts.append(not_null_expr)
 
         if where_parts:
             sql += " WHERE " + " AND ".join(where_parts)
 
         if group_by:
-            gb_exprs = [f"RTRIM(LTRIM({primary_table}.[{g}]))" for g in group_by]
+            gb_exprs = [gb_expr(g) for g in group_by]
             sql += f" GROUP BY {', '.join(gb_exprs)}"
 
         if order_by:
-            if "TotalAlerts" in order_by or "COUNT" in order_by:
-                sql += f" ORDER BY {order_by}"
+            if "TotalAlerts" in str(order_by) or "COUNT" in str(order_by).upper():
+                direction = "DESC"
+                parts = str(order_by).split()
+                if len(parts) > 1:
+                    direction = resolve_order_dir(parts[-1])
+                sql += f" ORDER BY TotalAlerts {direction}"
             else:
-                order_col = order_by.split()[0]
-                order_dir = order_by.split()[1] if len(order_by.split()) > 1 else "DESC"
-                sql += f" ORDER BY {primary_table}.[{order_col}] {order_dir}"
+                parts = str(order_by).split()
+                order_col = resolve_allowed_column(parts[0], table_cols)
+                order_dir = resolve_order_dir(parts[1] if len(parts) > 1 else "DESC")
+                sql += f" ORDER BY {qualify(primary_table, order_col)} {order_dir}"
+        elif intent in ["SUMMARY", "GROUP_BY"] and group_by:
+            # Default ORDER BY for summary/group by queries to get highest counts
+            sql += " ORDER BY TotalAlerts DESC"
 
-        return sql
+        return sql, params

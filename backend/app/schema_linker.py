@@ -89,7 +89,13 @@ class SchemaLinker:
                 elif edge["target_table"] == table and edge["source_table"] in self.schema_engine.tables_schema:
                     expanded_tables.add(edge["source_table"])
 
-        if expanded_tables != initial_tables:
+        # Hard Priority Override for Domain Vocabulary (branch, lho, alerts)
+        q_low = query_text.lower()
+        if any(w in q_low for w in ["branch", "branches", "lho", "lhos", "alert", "alerts", "dashboard", "summary"]):
+            target_tbl = "vw_AlertReporting" if (self.schema_engine and "vw_AlertReporting" in self.schema_engine.tables_schema) else "AlertsDetails"
+            initial_tables = {target_tbl}
+            expanded_tables = {target_tbl}
+        elif expanded_tables != initial_tables:
             print(f"[SCHEMA GRAPH] Expanded tables from {initial_tables} to include 1-hop FK neighbors: {expanded_tables - initial_tables}")
 
         # 4. Categorical Value Grounding

@@ -8,7 +8,7 @@ export default function FloatingWidget({ gatewayUrl = '', initialOpen = false, t
     {
       id: 'msg-init',
       role: 'assistant',
-      content: "Hello! I am your **Production Text-to-SQL Intelligence Assistant**. How can I assist with surveillance telemetry, active alerts, or branch operations today?"
+      content: "Hello! I am **DataTalk**. How can I assist you with exploring and querying your data today?"
     }
   ]);
   const [input, setInput] = useState('');
@@ -153,14 +153,71 @@ export default function FloatingWidget({ gatewayUrl = '', initialOpen = false, t
       {
         id: 'msg-init-reset',
         role: 'assistant',
-        content: "Chat session refreshed. How can I assist with your central surveillance queries?"
+        content: "Chat session refreshed. How can I help you converse with your data today?"
       }
     ]);
     setSessionId('');
     setFeedbackSent({});
   };
 
-  // Markdown table renderer
+  const parseInlineMarkdown = (text) => {
+    if (!text) return text;
+    const baseUrl = getEffectiveGatewayUrl();
+    const linkRegex = /\[([^\]]+)\]\(([^)]+)\)/g;
+    const result = [];
+    let lastIndex = 0;
+
+    text.replace(linkRegex, (match, linkText, linkUrl, offset) => {
+      if (offset > lastIndex) {
+        result.push(text.substring(lastIndex, offset));
+      }
+      let targetUrl = linkUrl;
+      if (targetUrl.startsWith('/')) {
+        targetUrl = `${baseUrl}${targetUrl}`;
+      }
+      result.push(
+        <a
+          key={offset}
+          href={targetUrl}
+          target="_blank"
+          rel="noopener noreferrer"
+          onClick={(e) => {
+            e.stopPropagation();
+            if (typeof window !== 'undefined') window.open(targetUrl, '_blank');
+          }}
+          style={{ color: '#38bdf8', textDecoration: 'underline', cursor: 'pointer', fontWeight: '600', display: 'inline-flex', alignItems: 'center', gap: '4px' }}
+        >
+          {linkText}
+        </a>
+      );
+      lastIndex = offset + match.length;
+      return match;
+    });
+
+    if (lastIndex < text.length) {
+      result.push(text.substring(lastIndex));
+    }
+
+    const elements = [];
+    result.forEach((item, idx) => {
+      if (typeof item !== 'string') {
+        elements.push(item);
+        return;
+      }
+      const boldParts = item.split(/\*\*(.*?)\*\*/g);
+      boldParts.forEach((part, bIdx) => {
+        if (bIdx % 2 === 1) {
+          elements.push(<strong key={`${idx}-${bIdx}`} style={{ fontWeight: '600', color: '#fff' }}>{part}</strong>);
+        } else if (part) {
+          elements.push(part);
+        }
+      });
+    });
+
+    return elements.length > 0 ? elements : text;
+  };
+
+  // Markdown table & content renderer
   const renderMessageContent = (text) => {
     if (!text) return null;
     const lines = text.split('\n');
@@ -201,7 +258,7 @@ export default function FloatingWidget({ gatewayUrl = '', initialOpen = false, t
                 {bodyRows.map((r, ri) => (
                   <tr key={`tr-${ri}`}>
                     {r.map((td, tdi) => (
-                      <td key={`td-${tdi}`}>{td}</td>
+                      <td key={`td-${tdi}`}>{parseInlineMarkdown(td)}</td>
                     ))}
                   </tr>
                 ))}
@@ -220,9 +277,10 @@ export default function FloatingWidget({ gatewayUrl = '', initialOpen = false, t
       } else {
         flushTable();
         if (line.trim()) {
-          const formatted = line.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
           elements.push(
-            <p key={`p-${key++}`} dangerouslySetInnerHTML={{ __html: formatted }} style={{ marginBottom: '6px', lineHeight: '1.45' }} />
+            <p key={`p-${key++}`} style={{ marginBottom: '6px', lineHeight: '1.45' }}>
+              {parseInlineMarkdown(line)}
+            </p>
           );
         }
       }
@@ -241,10 +299,14 @@ export default function FloatingWidget({ gatewayUrl = '', initialOpen = false, t
         <button
           onClick={() => setIsOpen(true)}
           className="sbi-cms-launcher-btn"
-          title="Open Text-to-SQL Assistant"
+          title="Open DataTalk"
         >
           <div className="sbi-cms-launcher-pulse" />
-          <Bot style={{ width: '28px', height: '28px' }} />
+          <img
+            src={`${getEffectiveGatewayUrl()}/plugin/logo.png`}
+            alt="DataTalk"
+            style={{ width: '34px', height: '34px', objectFit: 'contain', borderRadius: '4px' }}
+          />
         </button>
       )}
 
@@ -254,14 +316,18 @@ export default function FloatingWidget({ gatewayUrl = '', initialOpen = false, t
           {/* Header */}
           <div className="sbi-cms-popup-header">
             <div className="sbi-cms-popup-brand">
-              <div className="sbi-cms-brand-icon">
-                <Shield style={{ width: '20px', height: '20px' }} />
+              <div className="sbi-cms-brand-icon" style={{ background: 'transparent', border: 'none', padding: 0 }}>
+                <img
+                  src={`${getEffectiveGatewayUrl()}/plugin/logo.png`}
+                  alt="DataTalk"
+                  style={{ width: '32px', height: '32px', objectFit: 'contain' }}
+                />
               </div>
               <div>
-                <div className="sbi-cms-brand-title">Text-to-SQL Intelligence</div>
+                <div className="sbi-cms-brand-title">DataTalk</div>
                 <div className="sbi-cms-brand-subtitle">
                   <span className="sbi-cms-status-dot" />
-                  16-Stage Self-Hosted Gateway
+                  have conversations with your data.
                 </div>
               </div>
             </div>
@@ -364,7 +430,7 @@ export default function FloatingWidget({ gatewayUrl = '', initialOpen = false, t
               type="text"
               value={input}
               onChange={(e) => setInput(e.target.value)}
-              placeholder="Ask surveillance, camera status, or branch metrics..."
+              placeholder="Ask anything about your data..."
               className="sbi-cms-popup-input"
             />
             <button type="submit" disabled={!input.trim() || isTyping} className="sbi-cms-send-btn">

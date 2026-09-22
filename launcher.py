@@ -27,7 +27,8 @@ sys.path.insert(0, str(bundle_dir / "backend"))
 
 if __name__ == "__main__":
     print("=======================================================")
-    print("  SBI CMS Central Gateway Server - Standalone Executable")
+    print("  DataTalk Gateway Server - Standalone Executable")
+    print("  Have conversations with your data.")
     print("=======================================================")
     
     try:

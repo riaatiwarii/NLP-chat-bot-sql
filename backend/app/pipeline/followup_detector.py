@@ -1,3 +1,4 @@
+import re
 from sentence_transformers import SentenceTransformer, util
 from app.config import config
 
@@ -19,8 +20,11 @@ class FollowupDetector:
 
         current_lower = current_query.strip().lower()
         
-        # Check anaphora / trigger words
-        has_trigger = any(trigger in current_lower for trigger in config.FOLLOWUP_TRIGGER_WORDS)
+        # Check anaphora / trigger words with word boundary matching
+        has_trigger = any(
+            re.search(r'\b' + re.escape(trigger) + r'\b', current_lower)
+            for trigger in config.FOLLOWUP_TRIGGER_WORDS
+        )
         
         # Check if query is short / elliptical (e.g. "what about Mumbai?", "in Noida?")
         words = current_lower.split()
@@ -36,8 +40,19 @@ class FollowupDetector:
                 print(f"[FOLLOWUP DETECTOR WARNING] Embedding similarity calculation failed: {e}")
                 similarity = 0.0
 
-        # Decision rule: trigger present OR (high similarity AND short/incomplete)
-        if has_trigger or (similarity >= config.FOLLOWUP_EMBEDDING_SIMILARITY_THRESHOLD and is_short):
+        # Check if query is a standalone complete query specifying action + entities
+        has_standalone_action = any(w in current_lower for w in ["show", "list", "tell", "count", "get", "how many", "summary", "kount", "find"])
+        has_location_or_entity = any(w in current_lower for w in [
+            "noida", "agra", "delhi", "new delhi", "bhopal", "lho", "lhos", "branch", "branches", "alerts", "alertid",
+            "high", "low", "medium", "critical", "pending", "closed", "unresolved", "recent", "latest"
+        ])
+        
+        # Standalone complete queries (e.g. "Show low severity alerts from Noida", "list high severity alerts from agra") are NOT follow-ups
+        if has_standalone_action and has_location_or_entity and not has_trigger:
+            return False, similarity
+
+        # Decision rule: trigger present OR (high similarity AND short/incomplete fragment)
+        if has_trigger or (similarity >= config.FOLLOWUP_EMBEDDING_SIMILARITY_THRESHOLD and is_short and not has_standalone_action):
             return True, similarity
 
         return False, similarity

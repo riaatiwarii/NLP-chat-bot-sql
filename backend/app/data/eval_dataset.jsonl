@@ -1,0 +1,15 @@
+{"id": "count_distinct_lho", "query": "how many lhos are there", "expect": {"intent": "COUNT_DISTINCT", "select_columns_any_of": ["LHOCircle"], "forbidden_filter_columns": ["Severity", "Status", "AlertType"]}}
+{"id": "count_distinct_branch", "query": "how many branches are there", "expect": {"intent": "COUNT_DISTINCT", "select_columns_any_of": ["Branch"], "forbidden_filter_columns": ["Severity", "Status", "AlertType"]}}
+{"id": "list_all_branches", "query": "list all branches", "expect": {"intent": "SELECT_DISTINCT", "select_columns_any_of": ["Branch"]}}
+{"id": "show_all_alert_subtypes", "query": "show all alert sub types", "expect": {"intent": "SELECT_DISTINCT", "select_columns_any_of": ["AlertSubtype"]}}
+{"id": "count_distinct_alertsubtype_not_alerttype", "query": "how many sub type of alert are there", "expect": {"intent": "COUNT_DISTINCT", "select_columns_any_of": ["AlertSubtype"], "forbidden_select_columns": ["AlertType"]}}
+{"id": "geography_filter_branch_count", "query": "how many branches are there in new delhi", "expect": {"intent": "COUNT_DISTINCT", "select_columns_any_of": ["Branch"], "required_filter_columns": ["LHOCircle"], "forbidden_filter_columns": ["Severity", "Status", "AlertType"]}}
+{"id": "which_day_max_alerts", "query": "which day has maximum alerts", "expect": {"intent": "SUMMARY", "group_by_is_date": true, "limit": 1}}
+{"id": "resolved_summary_maps_to_closed", "query": "resolved alerts summary", "expect": {"intent": "SUMMARY", "required_filter_values": {"Status": "Closed"}}}
+{"id": "unresolved_summary_maps_to_pending", "query": "unresolved alert summary", "expect": {"intent": "SUMMARY", "required_filter_values": {"Status": "Pending"}}}
+{"id": "plain_how_many_alerts_is_count_not_distinct", "query": "how many alerts are there", "expect": {"intent": "COUNT"}}
+{"id": "count_with_location_filter", "query": "how many alerts in agra", "expect": {"intent": "COUNT", "required_filter_columns": ["Branch"]}}
+{"id": "ranking_top_branches", "query": "top 5 branches with the highest alerts", "expect": {"intent": "SUMMARY", "select_columns_any_of": ["Branch"], "limit": 5}}
+{"id": "simple_select_location", "query": "show alerts from noida", "expect": {"intent": "SELECT", "required_filter_columns": ["Branch"]}}
+{"id": "alert_id_lookup", "query": "tell me about alertid 93527", "expect": {"required_filter_values": {"AlertID": "93527"}}}
+{"id": "breakdown_by_severity", "query": "breakdown by severity", "expect": {"intent": "SUMMARY", "select_columns_any_of": ["Severity"]}}

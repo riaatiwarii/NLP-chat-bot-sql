@@ -16,8 +16,13 @@ export default function App() {
   // Ollama execution toggle (default to false for instant local rule engine)
   const [useOllama, setUseOllama] = useState(false);
   
-  // Conversation session state
+  // Conversation session state with persistent session_id
   const [chatContext, setChatContext] = useState({});
+  const [sessionId, setSessionId] = useState(() => {
+    // Initialize session_id from localStorage or generate new one
+    const saved = localStorage.getItem('sbi_cms_session_id');
+    return saved || 'session_' + Date.now();
+  });
 
   const fetchDashboard = async () => {
     try {
@@ -75,6 +80,7 @@ export default function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           message: text,
+          session_id: sessionId,
           history: updatedMessages,
           context: contextToSend
         })
@@ -83,8 +89,12 @@ export default function App() {
       if (response.ok) {
         const data = await response.json();
         setMessages(prev => [...prev, { role: 'assistant', content: data.response }]);
-        // Keep context returned from server
+        // Keep context returned from server and update session_id if provided
         setChatContext(data.context);
+        if (data.session_id && data.session_id !== sessionId) {
+          setSessionId(data.session_id);
+          localStorage.setItem('sbi_cms_session_id', data.session_id);
+        }
       } else {
         setMessages(prev => [...prev, { 
           role: 'assistant', 

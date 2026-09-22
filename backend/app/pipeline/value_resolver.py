@@ -71,17 +71,74 @@ class ValueResolver:
             except Exception as e:
                 print(f"[VALUE RESOLVER WARNING] Redis set failed: {e}")
 
+    def _normalize_matched_col(self, col: str) -> str:
+        if not col:
+            return col
+        c_low = col.lower()
+        if c_low in ["area", "location"]:
+            return "Branch"
+        if c_low in ["zone", "lho"]:
+            return "LHOCircle"
+        return col
+
     def resolve_entity(self, span_text: str, column_hint: str = None, entity_type: str = None) -> dict:
         """
         Executes the 5-step cascade for a single entity span text.
         For numeric_id entity spans, performs direct exact ID resolution.
         """
-        text_raw = span_text.strip()
+        text_raw = str(span_text or "").strip()
         text_lower = text_raw.lower()
 
-        # STEP 0: Numeric ID direct exact-match resolution (bypass fuzzy/phonetic/embedding cascade)
-        if entity_type == "numeric_id" or (text_raw.isdigit() and len(text_raw) >= 2):
+        if not text_raw:
+            return {
+                "original_span": span_text,
+                "resolved_value": None,
+                "matched_column": None,
+                "resolution_step": "unresolved_empty",
+                "confidence": 0.0,
+                "is_resolved": False
+            }
+
+        # MONTH NAMES WHITELIST: Whitelist all month names and date tokens (do not fail entity matching)
+        month_names = {
+            "january", "february", "march", "april", "may", "june", "july", "august",
+            "september", "october", "november", "december", "jan", "feb", "mar", "apr",
+            "jun", "jul", "aug", "sep", "sept", "oct", "nov", "dec"
+        }
+        if text_lower in month_names:
+            return {
+                "original_span": text_raw,
+                "resolved_value": None,
+                "matched_column": None,
+                "resolution_step": "date_month_token",
+                "confidence": 1.0,
+                "is_resolved": True
+            }
+
+        # STRUCTURAL / INTENT BLACKLIST: Never resolve structural words as DB entities
+        structural_blacklist = {
+            "breakdown", "summary", "distribution", "list", "show", "count",
+            "highest", "lowest", "least", "most", "total", "alerts", "alert", "which",
+            "what", "how", "many", "much", "type", "types", "subtype", "subtypes", "alerttype", "alerttypes",
+            "status", "severity", "sensor", "sensors",
+            "branch", "branches", "lho", "lhos", "zone", "zones", "area", "areas",
+            "by", "their", "wise", "between", "from", "to", "during", "recent", "latest"
+        }
+        if text_lower in structural_blacklist:
+            return {
+                "original_span": text_raw,
+                "resolved_value": None,
+                "matched_column": None,
+                "resolution_step": "unresolved_structural_keyword",
+                "confidence": 1.0,
+                "is_resolved": True
+            }
+
+        # STEP 0: Numeric ID direct exact-match resolution
+        is_year = text_raw.isdigit() and len(text_raw) == 4 and 1900 <= int(text_raw) <= 2100
+        if (entity_type == "numeric_id" or (text_raw.isdigit() and len(text_raw) >= 2)) and not (is_year and column_hint != "AlertID"):
             matched_col = column_hint if column_hint and column_hint in ["AlertID", "Id"] else "AlertID"
+            print(f"[VALUE RESOLVER] Resolved numeric ID: {text_raw} -> column: {matched_col}", flush=True)
             return {
                 "original_span": text_raw,
                 "resolved_value": text_raw,
@@ -91,14 +148,116 @@ class ValueResolver:
                 "is_resolved": True
             }
 
+        # STEP 0.5: Canonical Severity & Status Mapping Rules
+        if text_lower in ["high", "high severe", "high severity"]:
+            return {
+                "original_span": text_raw,
+                "resolved_value": "High",
+                "matched_column": "Severity",
+                "resolution_step": "0_canonical_severity",
+                "confidence": 1.0,
+                "is_resolved": True
+            }
+        if text_lower in ["low"]:
+            return {
+                "original_span": text_raw,
+                "resolved_value": "Low",
+                "matched_column": "Severity",
+                "resolution_step": "0_canonical_severity",
+                "confidence": 1.0,
+                "is_resolved": True
+            }
+        if text_lower in ["medium"]:
+            return {
+                "original_span": text_raw,
+                "resolved_value": "Medium",
+                "matched_column": "Severity",
+                "resolution_step": "0_canonical_severity",
+                "confidence": 1.0,
+                "is_resolved": True
+            }
+        # CRITICAL maps to High (DB has only High, Medium, Low)
+        if text_lower in ["critical", "crit", "severe"]:
+            return {
+                "original_span": text_raw,
+                "resolved_value": "High",
+                "matched_column": "Severity",
+                "resolution_step": "0_canonical_severity",
+                "confidence": 1.0,
+                "is_resolved": True
+            }
+        if text_lower in ["pending", "closed", "acknowledged", "unresolved", "open", "resolved"]:
+            res_val = "Pending" if text_lower in ["unresolved", "open"] else ("Closed" if text_lower == "resolved" else text_raw.capitalize())
+            return {
+                "original_span": text_raw,
+                "resolved_value": res_val,
+                "matched_column": "Status",
+                "resolution_step": "0_canonical_status",
+                "confidence": 1.0,
+                "is_resolved": True
+            }
+
+        # Canonical AlertSubtype Mapping
+        alert_subtype_map = {
+            "motion": "Motion",
+            "activity detection": "Activity Detection",
+            "device alert": "Device Alert",
+            "recording alert": "Recording Alert",
+            "device reboot": "Device Reboot",
+            "tamper": "Tamper",
+            "tampering": "Tamper",
+            "glass break": "Glass Break",
+            "glass-break": "Glass Break",
+            "panic": "Panic",
+            "shutter": "Shutter",
+            "two way": "Two Way",
+            "two-way": "Two Way",
+            "pir": "PIR",
+            "vibration": "Vibration",
+            "smoke": "Smoke",
+            "fire": "Fire",
+            "burglary": "Burglary"
+        }
+        if text_lower in alert_subtype_map:
+            return {
+                "original_span": text_raw,
+                "resolved_value": alert_subtype_map[text_lower],
+                "matched_column": "AlertSubtype",
+                "resolution_step": "0_canonical_alert_subtype",
+                "confidence": 1.0,
+                "is_resolved": True
+            }
+
+        # Canonical AlertType Mapping
+        alert_type_map = {
+            "vms": "VMS",
+            "analytics": "Analytics",
+            "cctv": "CCTV",
+            "atm": "ATM",
+            "intrusion": "Intrusion",
+            "dvr": "DVR",
+            "nvr": "NVR"
+        }
+        if text_lower in alert_type_map or entity_type == "alert_type":
+            canon_type = alert_type_map.get(text_lower, text_raw.upper() if len(text_raw) <= 4 else text_raw.title())
+            return {
+                "original_span": text_raw,
+                "resolved_value": canon_type,
+                "matched_column": "AlertType",
+                "resolution_step": "0_canonical_alert_type",
+                "confidence": 1.0,
+                "is_resolved": True
+            }
+
         # Gather candidate values to match against
         all_candidates = []
         col_map = {}
         for col_name, val_list in self.distinct_db_values.items():
+            norm_c = self._normalize_matched_col(col_name)
             for val in val_list:
                 str_val = str(val)
                 all_candidates.append(str_val)
-                col_map[str_val] = col_name
+                col_map[str_val] = norm_c
 
         # STEP 1: Exact match against known distinct column values
         for candidate in all_candidates:
@@ -106,7 +265,7 @@ class ValueResolver:
                 return {
                     "original_span": text_raw,
                     "resolved_value": candidate,
-                    "matched_column": col_map[candidate],
+                    "matched_column": self._normalize_matched_col(col_map[candidate]),
                     "resolution_step": "1_exact_db_match",
                     "confidence": 1.0,
                     "is_resolved": True
@@ -115,7 +274,7 @@ class ValueResolver:
                 return {
                     "original_span": text_raw,
                     "resolved_value": candidate,
-                    "matched_column": col_map[candidate],
+                    "matched_column": self._normalize_matched_col(col_map[candidate]),
                     "resolution_step": "1_substring_db_match",
                     "confidence": 0.95,
                     "is_resolved": True
@@ -137,6 +296,13 @@ class ValueResolver:
         if alias_match:
             # Map alias to DB column if possible
             matched_col = col_map.get(alias_match)
+            if not matched_col:
+                if alias_match.startswith("AO_") or any(k in alias_match.lower() for k in ["agra", "noida", "kanpur", "branch"]):
+                    matched_col = "Branch"
+                elif any(k in alias_match.lower() for k in ["circle", "new delhi", "delhi", "lho"]):
+                    matched_col = "LHOCircle"
+                else:
+                    matched_col = "Branch"
             return {
                 "original_span": text_raw,
                 "resolved_value": alias_match,

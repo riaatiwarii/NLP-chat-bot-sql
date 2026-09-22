@@ -25,8 +25,9 @@ class PipelineOrchestrator:
     Master 16-Stage Text-to-SQL Pipeline Orchestrator.
     Encapsulates stages 1 to 16 in strict execution sequence.
     """
-    def __init__(self, db_engine: Engine = None):
+    def __init__(self, db_engine: Engine = None, data_service = None):
         self.db_engine = db_engine
+        self.data_service = data_service
         
         # Redis client connection (optional gracefully failing cache)
         self.redis_client = self._init_redis()
@@ -63,7 +64,7 @@ class PipelineOrchestrator:
             fk_edges=self.fk_edges,
             embedder=self.embedder
         ) # Stage 6
-        self.plan_generator = PlanGenerator() # Stage 7
+        self.plan_generator = PlanGenerator(distinct_db_values=self.distinct_db_values) # Stage 7
         self.plan_generator.validate_schema_integrity({"tables": self.tables_schema})
         self.plan_validator = PlanValidator(schema_graph=self.schema_graph) # Stage 8
         self.sql_generator = SQLGenerator() # Stage 9
@@ -85,15 +86,50 @@ class PipelineOrchestrator:
         """
         sid = session_id or str(uuid.uuid4())
 
+        # Conversational / Chit-Chat & Feedback Interceptor
+        query_low = user_query.strip().lower()
+        cleaned_query = query_low.strip("!?,.:;\"' ")
+
+        greetings = ["hello", "hi", "hey", "good morning", "good afternoon", "good evening", "greetings"]
+        gratitude = ["thanks", "thank you", "thx", "appreciate it", "great", "awesome", "good job"]
+        feedback = ["that is wrong", "this is wrong", "wrong", "incorrect", "not correct", "that's wrong", "why", "why?"]
+        help_phrases = ["who are you", "what can you do", "help", "how to use", "what are your capabilities"]
+
+        if cleaned_query in greetings or any(cleaned_query.startswith(g) for g in ["hello ", "hi ", "hey "]):
+            resp_text = "Hello! I am your **CMS Text-to-SQL Intelligence Assistant**. I can help you analyze security alerts, camera health, branch telemetry, and incidents across SBI circles. How can I assist you today?"
+            return {"response": resp_text, "sql": None, "plan": None, "confidence_score": 1.0, "is_abstention": False, "session_id": sid, "context": {}}
+
+        if cleaned_query in gratitude:
+            resp_text = "You're welcome! Let me know if you need any more diagnostic queries, alert statistics, or telemetry reports."
+            return {"response": resp_text, "sql": None, "plan": None, "confidence_score": 1.0, "is_abstention": False, "session_id": sid, "context": {}}
+
+        if cleaned_query in feedback:
+            resp_text = "I apologize if the previous result was inaccurate. You can submit a correction via the thumbs-down feedback button, or ask the question with more specific details (e.g. branch name, alert type, or date range)."
+            return {"response": resp_text, "sql": None, "plan": None, "confidence_score": 1.0, "is_abstention": False, "session_id": sid, "context": {}}
+
+        if any(cleaned_query == h for h in help_phrases):
+            resp_text = (
+                "I am the **SBI Centralized Monitoring System (CMS) Analyst Bot**.\n\n"
+                "**Here are things you can ask me:**\n"
+                "- *Diagnostic queries*: `Tell me about alertID 93527`\n"
+                "- *Counts & Quantities*: `How many alerts in Noida?`\n"
+                "- *Date-filtered searches*: `Show alerts from yesterday` or `alerts on 18 Sep 2026`\n"
+                "- *Breakdowns & Summaries*: `Breakdown by severity` or `Breakdown by type`\n"
+                "- *Distinct Categories*: `Show me the type of alerts` or `List the LHOs`"
+            )
+            return {"response": resp_text, "sql": None, "plan": None, "confidence_score": 1.0, "is_abstention": False, "session_id": sid, "context": {}}
+
         # System Intent Interceptor: DASHBOARD_SUMMARY (Option B Layout: Area/Zone Breakdown Table)
-        query_low = user_query.lower()
         if any(phrase in query_low for phrase in [
             "dashboard summary", "dashboard overview", "today's dashboard summary",
             "todays dashboard summary", "show today's dashboard summary",
             "system overview", "central dashboard summary"
         ]):
-            from app.data_service import DataService
-            ds = DataService()
+            if self.data_service:
+                ds = self.data_service
+            else:
+                from app.data_service import DataService
+                ds = DataService()
             s = ds.get_dashboard_summary()
             breakdown = s.get("breakdown", [])
             tot_alerts = s.get("total_alerts_count", 0)
@@ -210,19 +246,28 @@ class PipelineOrchestrator:
             plan_valid, plan_err = self.plan_validator.validate(plan)
 
         # STAGE 9, 10, 11: SQL Generation, Validation, & Self-Correction Retry Loop
-        sql_query, sql_valid, sql_err, attempts_count, sql_fallback = self.self_correction_loop.execute_with_retry(
+        sql_query, sql_params, sql_valid, sql_err, attempts_count, sql_fallback = self.self_correction_loop.execute_with_retry(
             validated_plan=plan,
             schema_subset=schema_subset
         )
-
         used_fallback = plan_fallback or sql_fallback
+
+        # Check unparsed date expressions
+        unparsed_date = None
+        for e in entity_spans:
+            if e.get("type") in ["date_relative", "date_explicit"]:
+                parsed_d = self.plan_generator.parse_date_expression(e.get("span"))
+                if not parsed_d or not parsed_d.get("is_valid"):
+                    unparsed_date = e.get("span")
+                    break
 
         # STAGE 12: Confidence Scoring & Abstention Check
         confidence_score, should_abstain, clarification_msg = self.confidence_scorer.calculate_confidence(
             entities=resolved_entities,
             plan_valid=plan_valid,
             sql_valid=sql_valid,
-            attempts_count=attempts_count
+            attempts_count=attempts_count,
+            unparsed_date_expr=unparsed_date
         )
 
         # Abstention Check Decision
@@ -239,21 +284,27 @@ class PipelineOrchestrator:
             }
 
         # STAGE 13: Execute SQL
-        print(f"\n[GENERATED SQL LOG] Query: '{user_query}'\n>>> SQL: {sql_query}\n", flush=True)
-        rows, column_names, total_count, exec_err = self.executor.execute(sql_query)
+        print(f"\n[GENERATED SQL LOG] Query: '{user_query}'\n>>> SQL: {sql_query}\n>>> Params: {sql_params}\n", flush=True)
+        rows, column_names, total_count, exec_err = self.executor.execute(sql_query, sql_params if sql_params else {})
         if exec_err and attempts_count < config.MAX_SELF_CORRECTION_ATTEMPTS:
             # Try 1 more execution error self-repair retry
             gen_res = self.sql_generator.generate_sql(plan, schema_subset, retry_error=exec_err)
-            if isinstance(gen_res, tuple):
+            if isinstance(gen_res, tuple) and len(gen_res) == 3:
+                sql_query, sql_params, fb3 = gen_res
+                used_fallback = used_fallback or fb3
+            elif isinstance(gen_res, tuple) and len(gen_res) == 2:
                 sql_query, fb3 = gen_res
                 used_fallback = used_fallback or fb3
             else:
                 sql_query = gen_res
-            rows, column_names, total_count, exec_err = self.executor.execute(sql_query)
+            rows, column_names, total_count, exec_err = self.executor.execute(sql_query, sql_params)
+
+        # STAGE 13.5: Attachment Fetching (Disabled per user request)
+        select_cols = plan.get("select_columns") or []
 
         # STAGE 14: Natural Language Response Synthesis
         response_text = self.response_synthesizer.synthesize(
-            user_query, rows, column_names, total_count=total_count, select_columns=plan.get("select_columns")
+            user_query, rows, column_names, total_count=total_count, select_columns=select_cols, plan=plan
         )
 
         # STAGE 15: Logging & Feedback Capture
@@ -303,13 +354,21 @@ class PipelineOrchestrator:
         fk_edges = []
 
         try:
-            raw_tables = inspector.get_table_names()
+            try:
+                view_names = inspector.get_view_names()
+            except Exception:
+                view_names = []
+            raw_tables = inspector.get_table_names() + view_names
+            print(f"[SCHEMA INTROSPECTION] Found {len(raw_tables)} total tables/views: {raw_tables[:10]}...", flush=True)
             excluded = ('__', 'sys', 'dtproperties', 'AspNet', 'Log4', 'API_', 'DMS_', 'Token', 'AccessToken')
-            if config.ALLOWED_TABLES:
-                allowed_lower = [a.lower() for a in config.ALLOWED_TABLES]
-                tables = [t for t in raw_tables if t.lower() in allowed_lower]
-            else:
-                tables = ordered[:25]
+            allowed_lower = [a.lower() for a in config.ALLOWED_TABLES]
+            tables = [t for t in raw_tables if t.lower() in allowed_lower]
+            if not tables:
+                print(
+                    "[DATABASE INTROSPECTION] No approved tables found. "
+                    f"Allowed: {config.ALLOWED_TABLES}",
+                    flush=True
+                )
 
             print(f"[DATABASE INTROSPECTION] Introspecting target schema tables ({len(tables)} tables): {tables}...", flush=True)
 

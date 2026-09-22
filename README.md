@@ -1,4 +1,4 @@
-# 🏛️ SBI CMS Intelligence — Schema-Agnostic AI Text-to-SQL Chatbot Gateway
+# 🏛️ SBI CMS Intelligence — Domain-Specific NL-to-SQL Chatbot Gateway
 
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10+-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.109-009688?style=for-the-badge&logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
@@ -6,17 +6,21 @@
 [![Sentence Transformers](https://img.shields.io/badge/Embeddings-all--MiniLM--L6--v2-FF6F00?style=for-the-badge&logo=huggingface&logoColor=white)](https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2)
 [![MS SQL Server](https://img.shields.io/badge/Database-MS_SQL_Server-CC292B?style=for-the-badge&logo=microsoft-sql-server&logoColor=white)](https://www.microsoft.com/en-us/sql-server/)
 
-An enterprise-grade, **schema-agnostic Natural Language Processing (NLP) & Machine Learning Text-to-SQL Central Gateway** built for the State Bank of India Centralized Monitoring System (SBI CMS). It enables operators and bank executives to query live CCTV telemetry, active security incidents, operator metrics, and branch SOPs using natural language.
+A domain-specific **Natural Language Processing (NLP) & Machine Learning Text-to-SQL Gateway** built for the State Bank of India Centralized Monitoring System (SBI CMS). It enables operators and bank executives to query alert data, attachments, and metadata using natural language.
+
+**Strictly scoped to SBI CMS alert data:** `vw_AlertReporting`, `AlertsDetails`, `AlertAttachment`, `RawAttachments`, `Jurisdiction_mstr`, `Junction_mstr`, `Sensor_Master`.
 
 ---
 
 ## 🌟 Key Capabilities
 
-* **Dynamic Schema Introspection**: Automatically discovers tables, columns, and data types at runtime via SQLAlchemy `inspect()`. Zero hardcoded schema prompts.
-* **Semantic Schema Linking (`all-MiniLM-L6-v2`)**: Computes dense vector Cosine Similarity to map user query tokens (e.g. `"cams"`, `"faulty"`) to target database tables/columns even when column labels change.
+* **Schema-Scoped Querying**: Query only the approved SBI CMS tables for alert data, attachments, and metadata.
+* **Semantic Schema Linking (`all-MiniLM-L6-v2`)**: Computes dense vector Cosine Similarity to map user query tokens to target database tables/columns.
 * **Categorical Value Grounding**: Automatically grounds natural language terms (e.g. `"nariman point"`) to exact database string literals (e.g. `"SBI Nariman Point"`).
 * **Multi-Turn Context Resolution**: Remembers dialogue context across follow-up queries (e.g. *"Show incidents in Bhopal LHO"* → *"Are any of them critical?"*).
-* **1-Shot Self-Correction Loop**: Validates generated SQL AST and automatically self-repairs failed queries.
+* **Deterministic Rule-Based Pipeline**: Primary query engine works without LLM dependency.
+* **LLM Enhancement**: Ollama LLM provides reasoning for unseen phrasings (optional enhancement).
+* **Attachment Support**: Fetches and displays alert attachments (images/videos) from `RawAttachments` via base64 conversion.
 * **100% Shadow DOM Embeddable Plugin**: Includes a lightweight, style-isolated JavaScript floating widget that can be embedded into any external bank web portal or intranet with a single `<script>` tag.
 
 ---
@@ -35,18 +39,18 @@ An enterprise-grade, **schema-agnostic Natural Language Processing (NLP) & Machi
 │                                                        │
 │  ┌────────────────────┐   ┌─────────────────────────┐  │
 │  │ SchemaEngine       │   │ SchemaLinker            │  │
-│  │ (Introspection &   │   │ (Vector Similarity &    │  │
-│  │  Embedding Index)  │   │  Categorical Grounding) │  │
+│  │ (Schema Introspect │   │ (Vector Similarity &    │  │
+│  │  & Embedding Index)│   │  Categorical Grounding) │  │
 │  └─────────┬──────────┘   └────────────┬────────────┘  │
 │            │                           │               │
 │            ▼                           ▼               │
 │  ┌──────────────────────────────────────────────────┐  │
-│  │ ChatbotService + Ollama LLM / Rule-Based Router  │  │
+│  │ Pipeline Orchestrator (Rule-Based + Optional LLM) │  │
 │  └──────────────────────────┬───────────────────────┘  │
 │                             │                          │
 │                             ▼                          │
 │  ┌──────────────────────────────────────────────────┐  │
-│  │ Live MS SQL Server Database (OmniDash_CMS)       │  │
+│  │ SBI CMS Database (vw_AlertReporting, etc.)         │  │
 │  └──────────────────────────────────────────────────┘  │
 └────────────────────────────────────────────────────────┘
 ```
@@ -74,7 +78,7 @@ npm run install:frontend
 
 ### 2. Configure Database Credentials
 
-Create a `backend/.env` file:
+Create a `backend/.env` file (REQUIRED - no fallbacks):
 
 ```env
 DB_USER=sa
@@ -82,6 +86,8 @@ DB_PASSWORD=YourPassword
 DB_HOST=198.38.87.117
 DB_PORT=1433
 DB_NAME=OmniDash_CMS
+API_KEY=your_secure_api_key_here
+ALLOWED_ORIGINS=http://localhost:3000,http://localhost:8001
 ```
 
 ### 3. Run Development Servers

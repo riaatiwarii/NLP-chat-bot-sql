@@ -1,12 +1,12 @@
 import os
 import sys
 from pathlib import Path
-from fastapi import FastAPI, HTTPException, Body
+from typing import List, Dict, Any, Optional
+from fastapi import FastAPI, HTTPException, Body, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, RedirectResponse
 from pydantic import BaseModel
-from typing import List, Dict, Any, Optional
 
 from app.config import config
 from app.data_service import DataService
@@ -21,15 +21,19 @@ app = FastAPI(
 # Enable CORS for cross-origin embedded plugin widgets across servers
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origin_regex=r".*",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["*"],
 )
 
 # Initialize Services
 data_service = DataService()
-orchestrator = PipelineOrchestrator(db_engine=data_service.engine if data_service else None)
+orchestrator = PipelineOrchestrator(
+    db_engine=data_service.engine if data_service else None,
+    data_service=data_service
+)
 
 # Mount Plugin Assets Directory (serves widget.js, widget.css, and demo HTML files)
 possible_plugin_dirs = [
@@ -99,10 +103,16 @@ class FeedbackRequest(BaseModel):
     alias_canonical: Optional[str] = None
 
 @app.post("/api/chat", response_model=ChatResponse)
-def chat_endpoint(request: ChatRequest):
+def chat_endpoint(http_request: Request, request: ChatRequest):
     """
     Main 16-Stage Text-to-SQL Query Endpoint.
     """
+    # API Key Authentication for security
+    api_key = http_request.headers.get("X-API-Key")
+    expected_key = os.getenv("API_KEY")
+    if expected_key and api_key != expected_key:
+        raise HTTPException(status_code=401, detail="Invalid or missing API key")
+    
     try:
         query_text = request.message
         sid = request.session_id
@@ -206,6 +216,82 @@ def health_check():
             "ready_for_finetuning": dataset_count >= config.MIN_FINETUNING_EXAMPLES
         }
     }
+
+@app.get("/api/attachment/{attachment_id}")
+def get_attachment(attachment_id: int):
+    """
+    Serves binary attachment media (images/videos) from RawAttachments.
+    """
+    try:
+        if not data_service.engine:
+            raise HTTPException(status_code=503, detail="Database not connected")
+            
+        with data_service.engine.connect() as conn:
+            from sqlalchemy import text
+            # Try both FileString and common column name variations
+            res = conn.execute(text("SELECT FileName, FileType, FileString FROM RawAttachments WHERE id = :id"), {"id": attachment_id}).fetchone()
+            if not res:
+                # Try AlertAttachment table as fallback
+                res = conn.execute(text("SELECT FileName, FileType, FileString FROM AlertAttachment WHERE id = :id"), {"id": attachment_id}).fetchone()
+                if not res:
+                    raise HTTPException(status_code=404, detail="Attachment not found.")
+
+            file_name, file_type, file_blob = res[0], res[1], res[2]
+            
+            if not file_blob:
+                raise HTTPException(status_code=404, detail="Attachment data is empty")
+                
+            ft_lower = str(file_type or "").lower().strip(".")
+            if "png" in ft_lower:
+                media_type = "image/png"
+            elif "jpg" in ft_lower or "jpeg" in ft_lower:
+                media_type = "image/jpeg"
+            elif "mp4" in ft_lower or "video" in ft_lower:
+                media_type = "video/mp4"
+            elif "pdf" in ft_lower:
+                media_type = "application/pdf"
+            elif "text" in ft_lower or "txt" in ft_lower:
+                media_type = "text/plain"
+            elif "/" in ft_lower:
+                media_type = ft_lower
+            else:
+                media_type = "application/octet-stream"
+
+            import ast
+            import base64
+
+            # Handle binary data, python bytes literals b'...', base64 data, or raw bytes
+            blob_str = file_blob.decode("utf-8", errors="ignore") if isinstance(file_blob, (bytes, bytearray, memoryview)) else str(file_blob).strip()
+            if blob_str.startswith("b'") or blob_str.startswith('b"') or blob_str.startswith("b'''") or blob_str.startswith('b"""'):
+                try:
+                    binary_data = ast.literal_eval(blob_str)
+                except Exception:
+                    binary_data = blob_str.encode("latin1")
+            elif blob_str.startswith("data:"):
+                blob_str = blob_str.split(",", 1)[1]
+                try:
+                    binary_data = base64.b64decode(blob_str)
+                except Exception:
+                    binary_data = blob_str.encode("latin1")
+            elif isinstance(file_blob, (bytes, bytearray, memoryview)):
+                binary_data = bytes(file_blob)
+            else:
+                try:
+                    binary_data = base64.b64decode(blob_str)
+                except Exception:
+                    binary_data = blob_str.encode("latin1")
+
+            from fastapi.responses import Response
+            return Response(
+                content=binary_data,
+                media_type=media_type,
+                headers={"Content-Disposition": f"inline; filename=\"{file_name}\""}
+            )
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[ATTACHMENT ERROR]: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
     import uvicorn

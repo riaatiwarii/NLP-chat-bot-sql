@@ -17,17 +17,20 @@ class Config:
     OLLAMA_HOST: str = _raw_host.replace("0.0.0.0", "127.0.0.1")
     OLLAMA_MODEL: str = os.getenv("OLLAMA_MODEL", "qwen2.5-coder:7b")
     OLLAMA_RESPONSE_MODEL: str = os.getenv("OLLAMA_RESPONSE_MODEL", "qwen2.5-coder:7b")
-    OLLAMA_TIMEOUT: tuple = (10.0, 300.0)
+    OLLAMA_TIMEOUT: tuple = (
+        float(os.getenv("OLLAMA_CONNECT_TIMEOUT", "60.0")),
+        float(os.getenv("OLLAMA_READ_TIMEOUT", "600.0"))
+    )
 
     # Database Configuration (SQLAlchemy Connection String)
     DB_CONNECTION_STRING: str = os.getenv(
         "DB_CONNECTION_STRING",
-        os.getenv("DATABASE_URL", "sqlite:///backend/app/db.json")
+        os.getenv("DATABASE_URL", "")
     )
     
     # Target Database Table Filtering (Scoped strictly to 6 confirmed allowed tables)
     ALLOWED_TABLES: list = [
-        "AlertAttachment", "AlertsDetails", "Jurisdiction_mstr",
+        "vw_AlertReporting", "AlertAttachment", "AlertsDetails", "Jurisdiction_mstr",
         "RawAttachments", "Sensor_Master", "Junction_mstr"
     ]
 
@@ -69,7 +72,7 @@ class Config:
 
     # Column Classification (Display Columns vs Excluded Internal Columns)
     DEFAULT_DISPLAY_COLUMNS: list = [
-        "AlertID", "AlertType", "AlertSubtype", "Status", "Zone", "Area", "Severity", "Datetime", "Remarks", "CameraName", "NearestCamera"
+        "AlertID", "AlertType", "AlertSubtype", "Status", "Zone", "Area", "Severity", "Datetime", "Remarks", "CameraName", "NearestCamera", "AlertOccuranceTime", "Source", "CloseTime"
     ]
     INTERNAL_COLUMNS: list = [
         "Location", "SensorId", "Id", "CreatedBy", "UpdatedBy", "CreatedTime", "UpdatedTime",
@@ -98,6 +101,8 @@ class Config:
         "sum": "SUM",
         "list": "SELECT",
         "show": "SELECT",
+        "alert": "SELECT",
+        "alerts": "SELECT",
         "get": "SELECT",
         "find": "SELECT",
         "display": "SELECT",
@@ -128,5 +133,15 @@ class Config:
 
     # Data Collection & Fine-tuning Dataset Safeguards
     MIN_FINETUNING_EXAMPLES: int = int(os.getenv("MIN_FINETUNING_EXAMPLES", "300"))
+
+    # LLM SQL Draft Configuration
+    USE_LLM_SQL_DRAFT: bool = os.getenv("USE_LLM_SQL_DRAFT", "false").lower() in ("true", "1", "yes")
+    
+    # LLM Plan Generation Configuration - LLM is the primary planner; the deterministic
+    # builder in plan_generator.py only runs when Ollama is unreachable or returns invalid JSON.
+    USE_LLM_PLAN_GENERATION: bool = os.getenv("USE_LLM_PLAN_GENERATION", "true").lower() in ("true", "1", "yes")
+
+    # API Key Authentication
+    API_KEY: str = os.getenv("API_KEY", "")
 
 config = Config()

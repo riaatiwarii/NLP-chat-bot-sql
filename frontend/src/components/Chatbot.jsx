@@ -75,7 +75,7 @@ export default function Chatbot({ messages, onSendMessage, isTyping, ollamaActiv
               {bodyRows.map((r, ri) => (
                 <tr key={`tr-${ri}`}>
                   {r.map((td, tdi) => (
-                    <td key={`td-${tdi}`} style={{ padding: '8px', fontSize: '0.75rem' }}>{td}</td>
+                    <td key={`td-${tdi}`} style={{ padding: '8px', fontSize: '0.75rem' }}>{parseInlineMarkdown(td)}</td>
                   ))}
                 </tr>
               ))}
@@ -143,26 +143,40 @@ export default function Chatbot({ messages, onSendMessage, isTyping, ollamaActiv
     return elements;
   };
 
-  // Helper to parse bold (**text**) and code (`code`) inline styling
+  // Helper to parse bold (**text**), links [text](url), and code (`code`) inline styling
   const parseInlineMarkdown = (text) => {
-    let parts = [text];
+    if (!text) return text;
     
-    // Parse Bold: **text**
-    const boldRegex = /\*\*(.*?)\*\*/g;
-    let boldMatch;
-    
-    // Since simple string replacements are easier, we can convert markdown tags into sub-components
-    // For react output, we can use simple inline JSX rendering
-    // We'll split the text by the bold segments and render <strong> tags
+    // Parse Links: [text](url)
+    const linkRegex = /\[([^\]]+)\]\(([^)]+)\)/g;
     const result = [];
     let lastIndex = 0;
     
-    text.replace(boldRegex, (match, p1, offset) => {
+    const API_BASE = typeof window !== 'undefined' && window.location.hostname === 'localhost' ? 'http://localhost:8001' : '';
+    text.replace(linkRegex, (match, linkText, linkUrl, offset) => {
       // Add plain text before
       if (offset > lastIndex) {
         result.push(text.substring(lastIndex, offset));
       }
-      result.push(<strong key={offset} style={{ fontWeight: '600', color: '#fff' }}>{p1}</strong>);
+      let targetUrl = linkUrl;
+      if (targetUrl.startsWith('/') && API_BASE) {
+        targetUrl = `${API_BASE}${targetUrl}`;
+      }
+      result.push(
+        <a
+          key={offset}
+          href={targetUrl}
+          target="_blank"
+          rel="noopener noreferrer"
+          onClick={(e) => {
+            e.stopPropagation();
+            if (typeof window !== 'undefined') window.open(targetUrl, '_blank');
+          }}
+          style={{ color: '#38bdf8', textDecoration: 'underline', cursor: 'pointer', fontWeight: '600', display: 'inline-flex', alignItems: 'center', gap: '4px' }}
+        >
+          {linkText}
+        </a>
+      );
       lastIndex = offset + match.length;
       return match;
     });
@@ -170,9 +184,24 @@ export default function Chatbot({ messages, onSendMessage, isTyping, ollamaActiv
     if (lastIndex < text.length) {
       result.push(text.substring(lastIndex));
     }
+    
+    const elements = [];
+    result.forEach((item, idx) => {
+      if (typeof item !== 'string') {
+        elements.push(item);
+        return;
+      }
+      const boldParts = item.split(/\*\*(.*?)\*\*/g);
+      boldParts.forEach((part, bIdx) => {
+        if (bIdx % 2 === 1) {
+          elements.push(<strong key={`b-${idx}-${bIdx}`} style={{ fontWeight: '600', color: '#fff' }}>{part}</strong>);
+        } else if (part) {
+          elements.push(part);
+        }
+      });
+    });
 
-    if (result.length === 0) return text;
-    return result;
+    return elements.length > 0 ? elements : text;
   };
 
   return (

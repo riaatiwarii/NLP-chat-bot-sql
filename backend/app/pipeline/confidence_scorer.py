@@ -14,13 +14,19 @@ class ConfidenceScorer:
         entities: list[dict],
         plan_valid: bool,
         sql_valid: bool,
-        attempts_count: int
+        attempts_count: int,
+        unparsed_date_expr: str = None
     ) -> tuple[float, bool, str]:
         """
         Returns (confidence_score: float, should_abstain: bool, clarification_reason: str).
         """
         score = 1.0
         reasons = []
+
+        # 0. Unparsed Date Expression Penalty
+        if unparsed_date_expr:
+            score -= 0.50
+            reasons.append(f"could not confidently parse date expression '{unparsed_date_expr}'")
 
         # 1. Unresolved Entity Penalty
         unresolved = [e for e in entities if not e.get("is_resolved")]

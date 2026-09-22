@@ -33,9 +33,19 @@ class Extractor:
                 intent_spans.append({"span": word.strip(".,?!;:()\"'"), "type": "intent_word"})
 
         # 2. Identify candidate entity spans via regex & known dict matching
-        # Status / Severity patterns
-        severity_matches = re.findall(r'\b(offline|online|active|open|closed|unresolved|pending|resolved|critical|high|medium|low|tampering|breach|panic)\b', text, re.IGNORECASE)
+        # AlertType patterns (e.g. VMS, CCTV, Motion, Smoke, Fire, Burglary, Tamper, ATM, Intrusion, Two Way, Panic, Shutter)
+        alert_type_matches = re.findall(r'\b(vms|cctv|motion|smoke|fire|burglary|tamper|tampering|atm|intrusion|two[\s-]way|two\s+way|panic|shutter|glass[\s-]break|pir|vibration|dvr|nvr)\b', text, re.IGNORECASE)
+        for match in alert_type_matches:
+            entity_spans.append({"span": match, "type": "alert_type"})
+
+        # Status / Severity patterns (exclude 'high' when part of 'highest' and 'low' when part of 'lowest')
+        severity_matches = re.findall(r'\b(offline|online|active|open|closed|unresolved|pending|resolved|critical|high\s+severe|high\s+severity|high|medium|low|tampering|breach|panic)\b', text, re.IGNORECASE)
         for match in severity_matches:
+            m_low = match.lower()
+            if m_low == "high" and "highest" in text.lower():
+                continue
+            if m_low == "low" and "lowest" in text.lower():
+                continue
             entity_spans.append({"span": match, "type": "status_severity"})
 
         # Location / Place name patterns (multi-word and single word)
@@ -48,13 +58,19 @@ class Extractor:
                 actual_span = text[start_idx:end_idx]
                 entity_spans.append({"span": actual_span, "type": "location"})
 
-        # Date expression patterns (relative and explicit dates)
-        date_relative_matches = re.findall(r'\b(today|yesterday|this week|last week|this month|last 7 days)\b', text, re.IGNORECASE)
+        # Date expression patterns (relative, day of week, and explicit/text dates)
+        date_relative_matches = re.findall(r'\b(today|yesterday|this week|last week|this month|last 7 days|past 7 days|past week|last month|past month|last 30 days|past 30 days|last monday|last tuesday|last wednesday|last thursday|last friday|last saturday|last sunday|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b', text, re.IGNORECASE)
         for dmatch in date_relative_matches:
             entity_spans.append({"span": dmatch, "type": "date_relative"})
 
-        # Explicit date format patterns (YYYY-MM-DD or DD/MM/YYYY)
-        date_explicit_matches = re.findall(r'\b\d{4}-\d{2}-\d{2}\b|\b\d{2}/\d{2}/\d{4}\b', text)
+        # Explicit and text date format patterns (YYYY-MM-DD, DD/MM/YYYY, 16 September, 16 Sep, 16th September, between ... and ...)
+        date_explicit_matches = re.findall(
+            r'\b(?:between|from)\s+[a-z0-9\s/]+?\s+(?:and|to|-)\s+[a-z0-9\s/]+(?:\s+\d{4})?\b|'
+            r'\b\d{4}-\d{2}-\d{2}\b|\b\d{1,2}/\d{1,2}/\d{4}\b|'
+            r'\b\d{1,2}(?:st|nd|rd|th)?\s+(?:january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|aug|sep|sept|oct|nov|dec)(?:\s+\d{4})?\b|'
+            r'\b(?:january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|aug|sep|sept|oct|nov|dec)\s+\d{1,2}(?:st|nd|rd|th)?(?:\s+\d{4})?\b',
+            text, re.IGNORECASE
+        )
         for edmatch in date_explicit_matches:
             entity_spans.append({"span": edmatch, "type": "date_explicit"})
 
@@ -65,7 +81,8 @@ class Extractor:
 
         number_matches = re.findall(r'\b\d+\b', text)
         for num in number_matches:
-            if not any(num in ed for ed in date_explicit_matches) and len(num) >= 3:
+            is_year = len(num) == 4 and 1900 <= int(num) <= 2100
+            if not any(num in ed for ed in date_explicit_matches) and len(num) >= 3 and not is_year:
                 entity_spans.append({"span": num, "type": "numeric_id"})
 
         # Time-ordering patterns (recent, latest, newest)
@@ -81,13 +98,23 @@ class Extractor:
                 entity_spans.append({"span": dmatch, "type": "candidate_entity"})
 
         # Fallback: if no location span was picked up, check capitalized proper nouns (len > 1)
+        months_set = {
+            "january", "february", "march", "april", "may", "june", "july", "august",
+            "september", "october", "november", "december", "jan", "feb", "mar", "apr",
+            "jun", "jul", "aug", "sep", "sept", "oct", "nov", "dec"
+        }
         skip_words = {
             "show", "list", "count", "how", "what", "which", "tell", "me", "about",
-            "recent", "latest", "newest", "highest", "top", "max", "min", "all",
+            "recent", "latest", "newest", "highest", "lowest", "least", "most", "top", "max", "min", "all",
             "alert", "alerts", "details", "data", "log", "logs", "record", "records",
-            "more", "some", "any", "branch", "branches", "zone", "zones",
-            "area", "areas", "location", "locations", "has", "the", "in", "for", "with", "of", "is", "are"
-        }
+            "more", "some", "any", "branch", "branches", "zone", "zones", "type", "types", "subtype", "subtypes", "alerttype",
+            "summary", "dashboard", "breakdown", "distribution",
+            "area", "areas", "location", "locations", "has", "the", "in", "for", "with", "of", "is", "are",
+            "by", "their", "wise", "and", "or", "between", "from", "to", "during", "on", "at",
+            "unresolved", "resolved", "pending", "closed", "open", "high", "low", "medium", "critical",
+            "vms", "cctv", "motion", "smoke", "fire", "atm", "dvr", "nvr"
+        } | months_set
+
         if not any(e["type"] == "location" for e in entity_spans):
             for word in words:
                 clean_w = word.strip(".,?!;:()\"'")

@@ -1,23 +1,30 @@
+import re
 from sqlalchemy import text, Engine
 
 class SQLExecutor:
     """
     Stage 13: Execution
-    Runs validated SQL queries safely against the database engine.
+    Runs validated parameterized SQL against the database engine.
     """
     def __init__(self, db_engine: Engine = None):
         self.db_engine = db_engine
 
-    def execute(self, sql_query: str) -> tuple[list[dict], list[str], int, str]:
-        """
-        Executes query and returns (rows_dict_list, column_names, total_count, error_msg).
-        """
+    def execute(self, sql_query: str, params: dict = None) -> tuple[list[dict], list[str], int, str]:
         if not self.db_engine:
             return [], [], 0, "No database engine configured."
 
+        bind = params or {}
+        # Convert numeric string IDs to integers for proper parameter binding
+        for key, value in bind.items():
+            if isinstance(value, str) and value.isdigit():
+                bind[key] = int(value)
+        
+        print(f"[EXECUTOR] SQL: {sql_query}")
+        print(f"[EXECUTOR] Params: {bind}")
+        
         try:
             with self.db_engine.connect() as conn:
-                result = conn.execute(text(sql_query))
+                result = conn.execute(text(sql_query), bind)
                 if result.returns_rows:
                     keys = list(result.keys())
                     raw_rows = result.fetchall()
@@ -35,16 +42,21 @@ class SQLExecutor:
                         rows.append(row_dict)
 
                     total_count = len(rows)
-                    # If query was capped with TOP / LIMIT, get un-capped total matching row count
-                    if " TOP " in sql_query.upper() or " LIMIT " in sql_query.upper():
+                    # For TOP listing queries, run separate COUNT(*) to get actual matching count in DB
+                    if "TOP " in sql_query.upper() and "GROUP BY" not in sql_query.upper() and "DISTINCT" not in sql_query.upper():
                         try:
-                            import re
-                            count_sql = re.sub(r'SELECT\s+(?:TOP\s+\d+\s+)?.*?\s+FROM\s+', 'SELECT COUNT(*) FROM ', sql_query, flags=re.IGNORECASE)
-                            c_res = conn.execute(text(count_sql)).scalar()
-                            if c_res is not None:
-                                total_count = int(c_res)
-                        except Exception:
-                            pass
+                            match = re.search(r'\bFROM\b\s+(.*)', sql_query, re.IGNORECASE | re.DOTALL)
+                            if match:
+                                from_part = match.group(1)
+                                order_idx = from_part.upper().rfind("ORDER BY")
+                                if order_idx != -1:
+                                    from_part = from_part[:order_idx]
+                                count_sql = f"SELECT COUNT(*) FROM {from_part.strip()}"
+                                cnt_res = conn.execute(text(count_sql), bind).scalar()
+                                if cnt_res is not None:
+                                    total_count = int(cnt_res)
+                        except Exception as count_err:
+                            print(f"[EXECUTOR WARNING] Could not fetch total count: {count_err}", flush=True)
 
                     return rows, keys, total_count, ""
                 else:

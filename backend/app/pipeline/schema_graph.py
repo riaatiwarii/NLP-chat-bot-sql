@@ -63,11 +63,16 @@ class SchemaGraph:
 
         selected_tables = set()
 
-        # Keyword-based domain priority boost for primary tables
+        # Keyword-based domain priority boost with HARD PRIORITY for vw_AlertReporting / AlertsDetails
         q_lower = query.lower()
+        if any(w in q_lower for w in ["branch", "branches", "lho", "lhos", "alert", "alerts", "dashboard", "summary", "report", "telemetry"]):
+            # Hard lock to vw_AlertReporting to prevent Sensor_Master or Jurisdiction_mstr lexical interference
+            target_tbl = "vw_AlertReporting" if "vw_AlertReporting" in self.tables_schema else "AlertsDetails"
+            if target_tbl in self.tables_schema:
+                subset_tables = {target_tbl: self.tables_schema[target_tbl]}
+                return {"tables": subset_tables, "join_paths": []}
+
         priority_boost = []
-        if any(w in q_lower for w in ["alert", "dashboard", "summary", "report", "telemetry"]):
-            priority_boost.extend(["AlertsDetails", "Alerts", "AlertHistory"])
         if "incident" in q_lower:
             priority_boost.extend(["Incident_Data", "IncidentHistory"])
         if any(w in q_lower for w in ["camera", "cctv", "recording"]):

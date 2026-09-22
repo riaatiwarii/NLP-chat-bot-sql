@@ -27,13 +27,18 @@ class DataService:
         self.use_sql_server = False
         self.engine = None
         
-        # Read database parameters (both formats)
+        # Read database parameters (both formats) - NO FALLBACKS for security
         db_url = os.getenv("DATABASE_URL")
-        db_user = os.getenv("DB_USER", "sa")
-        password = os.getenv("DB_PASSWORD", "Iccc@321")
-        host = os.getenv("DB_HOST", "198.38.87.117")
-        port = os.getenv("DB_PORT", "1433")
-        dbname = os.getenv("DB_NAME", "OmniDash_CMS")
+        db_user = os.getenv("DB_USER")
+        password = os.getenv("DB_PASSWORD")
+        host = os.getenv("DB_HOST")
+        port = os.getenv("DB_PORT")
+        dbname = os.getenv("DB_NAME")
+        
+        # Fail loudly if required credentials are missing
+        if not db_url and not all([db_user, password, host, dbname]):
+            print("[DATABASE ERROR] Missing required database credentials. Set DB_USER, DB_PASSWORD, DB_HOST, DB_NAME or DATABASE_URL.")
+            raise ValueError("Database credentials not configured")
 
         # Connection URL constructor with auto URL-encoding
         configured_url = None
@@ -54,7 +59,7 @@ class DataService:
             
             if not configured_url:
                 configured_url = db_url
-        elif password and password != "YOUR_PASSWORD":
+        elif all([db_user, password, host, dbname]):
             # Form from separate fields
             encoded_password = urllib.parse.quote_plus(password)
             configured_url = f"mssql+pymssql://{db_user}:{encoded_password}@{host}:{port}/{dbname}"
@@ -69,9 +74,12 @@ class DataService:
                     pool_recycle=600, 
                     connect_args={"timeout": 5}
                 )
-                # Test connectivity
+                # Test connectivity and check for vw_AlertReporting
                 with self.engine.connect() as conn:
                     conn.execute(text("SELECT 1"))
+                    # Check if vw_AlertReporting exists
+                    tables_check = conn.execute(text("SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = 'vw_AlertReporting'")).fetchall()
+                    print(f"[DATABASE] vw_AlertReporting exists: {len(tables_check) > 0}")
                 self.use_sql_server = True
                 self.connection_error = None
                 print(f"[DATABASE] Connected successfully to live SQL Server.")

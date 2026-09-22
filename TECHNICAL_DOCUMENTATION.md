@@ -24,9 +24,9 @@ The gateway bridges unstructured operator natural language queries and structure
 * **Source File**: [`backend/app/schema_engine.py`](file:///d:/NLP-chat-bot-sql/backend/app/schema_engine.py)
 
 ### 2.1 Table Filtering & Prioritization
-In large enterprise databases (e.g. `OmniDash_CMS` with 198+ tables), introspecting every single table causes significant initialization latency. The `SchemaEngine` filters out system tables (migration tracking, token tables, temporal logs) and caps introspection to domain-relevant tables:
+The `SchemaEngine` is strictly scoped to approved SBI CMS tables only:
 
-$$\text{Priority Tables} = \{\text{CameraList}, \text{Incident\_Data}, \text{AlertsDetails}, \text{Master\_CamDetails}, \text{Location\_Master}, \text{SOP\_MASTER}, \text{IncidentHistory}\}$$
+$$\text{Allowed Tables} = \{\text{vw\_AlertReporting}, \text{AlertsDetails}, \text{AlertAttachment}, \text{RawAttachments}, \text{Jurisdiction\_mstr}, \text{Junction\_mstr}, \text{Sensor\_Master}\}$$
 
 ### 2.2 Bounded Subquery Distinct Value Sampling
 Unindexed text column scans across millions of rows can cause full table scans. To extract sample categorical values in sub-second time, `SchemaEngine` executes bounded nested subquery sampling:
@@ -94,9 +94,9 @@ stateDiagram-v2
 
 ---
 
-## 5. Automated AST Validation & 1-Shot Self-Repair Loop (`ChatbotService`)
+## 5. Automated AST Validation & 1-Shot Self-Repair Loop
 
-* **Source File**: [`backend/app/chatbot_service.py`](file:///d:/NLP-chat-bot-sql/backend/app/chatbot_service.py)
+* **Source File**: [`backend/app/pipeline/self_correction.py`](file:///d:/NLP-chat-bot-sql/backend/app/pipeline/self_correction.py)
 
 ```mermaid
 flowchart TD
